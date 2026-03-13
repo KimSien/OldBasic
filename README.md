@@ -10,7 +10,9 @@
 - FOR/NEXTループ、DIM配列 
 - DATA/READ/RESTORE、REMコメント 
 - 算術・比較・論理演算子 
-- 組み込み関数: INT, ABS, SQR, RND, LEN, LEFT$, RIGHT$, MID$, STR$, VAL, CHR$, ASC
+- 組み込み関数（文字列）: LEN, LEFT$, RIGHT$, MID$, STR$, VAL, CHR$, ASC
+- 組み込み関数（数値）: INT, ABS, FIX, SGN, SQR, RND, LOG, EXP, SIN, COS, TAN, ATN
+- 組み込み関数（出力）: TAB
 
 # 使い方
 ## ファイルを実行 
