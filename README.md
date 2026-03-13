@@ -21,4 +21,9 @@ python3 basic.py examples/hello.bas
 ## 対話型REPL
 python3 basic.py
 
+# 開発メモ
+## テストの実行方法: 
+.venv/bin/python -m pytest tests/test_interpreter.py -v
+
+
 
