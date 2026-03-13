@@ -1,0 +1,764 @@
+"""
+BASIC Tree-walk Interpreter.
+
+Execution model
+---------------
+* The program is stored as an ordered list of Line objects.
+* A program counter (PC) indexes into that list.
+* GOTO / GOSUB / NEXT alter the PC directly.
+* Variables live in a flat dict.  String var names end in '$'.
+* Arrays are stored as {name: list}.
+* A GOSUB stack tracks return addresses.
+* FOR loops push a LoopFrame onto a loop stack.
+* DATA values are collected at load time; READ walks a pointer through them.
+"""
+
+from __future__ import annotations
+
+import math
+import random
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+from .parser import (
+    Parser, ParseError,
+    Line,
+    NumberNode, StringNode, VarNode, ArrayAccessNode, FuncCallNode,
+    BinOpNode, UnaryOpNode,
+    RemStmt, PrintStmt, LetStmt, InputStmt, IfStmt,
+    GotoStmt, GosubStmt, ReturnStmt,
+    ForStmt, NextStmt,
+    EndStmt, StopStmt,
+    DimStmt, DataStmt, ReadStmt, RestoreStmt,
+)
+from .lexer import TT
+
+
+# ---------------------------------------------------------------------------
+# Helpers / sentinel exceptions
+# ---------------------------------------------------------------------------
+
+class BasicError(Exception):
+    """Runtime error with optional BASIC line number."""
+    def __init__(self, msg: str, lineno: int = 0):
+        self.lineno = lineno
+        super().__init__(msg)
+
+    def __str__(self):
+        prefix = f'Error at line {self.lineno}: ' if self.lineno else 'Error: '
+        return prefix + super().__str__()
+
+
+class _EndSignal(Exception):
+    """Raised by END / STOP to exit the run loop cleanly."""
+
+
+class _GotoSignal(Exception):
+    def __init__(self, lineno: int):
+        self.lineno = lineno
+
+
+class _GosubSignal(Exception):
+    def __init__(self, lineno: int):
+        self.lineno = lineno
+
+
+class _ReturnSignal(Exception):
+    pass
+
+
+@dataclass
+class _ForFrame:
+    var:     str
+    end:     float
+    step:    float
+    loop_pc: int   # PC of the FOR line (we jump back here on NEXT)
+
+
+# ---------------------------------------------------------------------------
+# Interpreter
+# ---------------------------------------------------------------------------
+
+class Interpreter:
+    def __init__(self, interactive: bool = False):
+        self._interactive = interactive
+        self._parser      = Parser()
+        self._reset()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def load(self, source: str):
+        """Parse and load a program from source text."""
+        self._reset()
+        try:
+            lines = self._parser.parse_program(source)
+        except ParseError as e:
+            raise BasicError(str(e)) from e
+        self._lines   = lines
+        self._line_map = {l.lineno: i for i, l in enumerate(lines)}
+        self._collect_data()
+
+    def run(self):
+        """Execute the loaded program from the first line."""
+        if not self._lines:
+            return
+        self._pc = 0
+        self._run_loop()
+
+    def run_line(self, raw: str):
+        """Execute a single line (REPL mode). Line number 0 = immediate."""
+        try:
+            line = self._parser.parse_line(raw)
+        except ParseError as e:
+            print(f'Parse error: {e}')
+            return
+        if line is None:
+            return
+        if line.lineno == 0:
+            # Immediate mode: execute all statements
+            try:
+                for stmt in line.stmts:
+                    self._exec_stmt(stmt, lineno=0)
+            except _EndSignal:
+                pass
+            except BasicError as e:
+                print(e)
+        else:
+            # Numbered line: add/replace in program
+            self._add_line(line)
+
+    def list_program(self):
+        """Print the stored program (REPL LIST command)."""
+        for line in self._lines:
+            print(self._decompile_line(line))
+
+    # ------------------------------------------------------------------
+    # Internal reset
+    # ------------------------------------------------------------------
+
+    def _reset(self):
+        self._lines:      list[Line]        = []
+        self._line_map:   dict[int, int]    = {}
+        self._vars:       dict[str, Any]    = {}
+        self._arrays:     dict[str, list]   = {}
+        self._gosub_stack: list[int]        = []  # stack of return PCs
+        self._for_stack:  list[_ForFrame]   = []
+        self._data:       list[Any]         = []
+        self._data_ptr:   int               = 0
+        self._pc:         int               = 0
+
+    # ------------------------------------------------------------------
+    # DATA collection
+    # ------------------------------------------------------------------
+
+    def _collect_data(self):
+        self._data = []
+        for line in self._lines:
+            for stmt in line.stmts:
+                if isinstance(stmt, DataStmt):
+                    self._data.extend(stmt.values)
+        self._data_ptr = 0
+
+    # ------------------------------------------------------------------
+    # Program manipulation (REPL)
+    # ------------------------------------------------------------------
+
+    def _add_line(self, line: Line):
+        if line.lineno in self._line_map:
+            idx = self._line_map[line.lineno]
+            self._lines[idx] = line
+        else:
+            self._lines.append(line)
+            self._lines.sort(key=lambda l: l.lineno)
+        # Rebuild map
+        self._line_map = {l.lineno: i for i, l in enumerate(self._lines)}
+        self._collect_data()
+
+    # ------------------------------------------------------------------
+    # Main execution loop
+    # ------------------------------------------------------------------
+
+    def _run_loop(self):
+        while 0 <= self._pc < len(self._lines):
+            line = self._lines[self._pc]
+            try:
+                self._exec_line(line)
+                # Normal advance only if _exec_line didn't change PC
+                self._pc += 1
+            except _GotoSignal as g:
+                self._pc = self._resolve_lineno(g.lineno, line.lineno)
+            except _GosubSignal as gs:
+                self._gosub_stack.append(self._pc + 1)
+                self._pc = self._resolve_lineno(gs.lineno, line.lineno)
+            except _ReturnSignal:
+                if not self._gosub_stack:
+                    raise BasicError('RETURN without GOSUB', line.lineno)
+                self._pc = self._gosub_stack.pop()
+            except _EndSignal:
+                return
+            except BasicError:
+                raise
+
+    def _exec_line(self, line: Line):
+        for stmt in line.stmts:
+            self._exec_stmt(stmt, lineno=line.lineno)
+
+    def _exec_stmt(self, stmt: Any, lineno: int = 0):
+        try:
+            self._dispatch(stmt, lineno)
+        except (_EndSignal, _GotoSignal, _GosubSignal, _ReturnSignal):
+            raise
+        except BasicError:
+            raise
+        except Exception as e:
+            raise BasicError(str(e), lineno) from e
+
+    def _dispatch(self, stmt: Any, lineno: int):
+        if isinstance(stmt, RemStmt):
+            return
+
+        if isinstance(stmt, PrintStmt):
+            self._exec_print(stmt, lineno)
+            return
+
+        if isinstance(stmt, LetStmt):
+            value = self._eval(stmt.value, lineno)
+            self._assign(stmt.target, value, lineno)
+            return
+
+        if isinstance(stmt, InputStmt):
+            self._exec_input(stmt, lineno)
+            return
+
+        if isinstance(stmt, IfStmt):
+            cond = self._eval(stmt.condition, lineno)
+            if self._truthy(cond):
+                self._exec_stmt(stmt.then_stmt, lineno)
+            elif stmt.else_stmt is not None:
+                self._exec_stmt(stmt.else_stmt, lineno)
+            return
+
+        if isinstance(stmt, GotoStmt):
+            raise _GotoSignal(stmt.lineno)
+
+        if isinstance(stmt, GosubStmt):
+            raise _GosubSignal(stmt.lineno)
+
+        if isinstance(stmt, ReturnStmt):
+            raise _ReturnSignal()
+
+        if isinstance(stmt, ForStmt):
+            self._exec_for(stmt, lineno)
+            return
+
+        if isinstance(stmt, NextStmt):
+            self._exec_next(stmt, lineno)
+            return
+
+        if isinstance(stmt, EndStmt):
+            raise _EndSignal()
+
+        if isinstance(stmt, StopStmt):
+            if self._interactive:
+                print('STOP')
+            raise _EndSignal()
+
+        if isinstance(stmt, DimStmt):
+            size = int(self._eval(stmt.size, lineno))
+            # BASIC arrays are 1-based; allocate size+1 elements
+            self._arrays[stmt.name] = [0] * (size + 1)
+            return
+
+        if isinstance(stmt, DataStmt):
+            return  # already collected
+
+        if isinstance(stmt, ReadStmt):
+            for var in stmt.vars:
+                if self._data_ptr >= len(self._data):
+                    raise BasicError('Out of DATA', lineno)
+                value = self._data[self._data_ptr]
+                self._data_ptr += 1
+                self._assign(var, value, lineno)
+            return
+
+        if isinstance(stmt, RestoreStmt):
+            self._data_ptr = 0
+            return
+
+        raise BasicError(f'Unknown statement type {type(stmt).__name__}', lineno)
+
+    # ------------------------------------------------------------------
+    # PRINT
+    # ------------------------------------------------------------------
+
+    def _exec_print(self, stmt: PrintStmt, lineno: int):
+        output_parts = []
+        suppress_newline = False
+
+        items = stmt.items
+        for i, item in enumerate(items):
+            kind, val = item
+            if kind == 'sep':
+                if val == TT.SEMICOLON:
+                    suppress_newline = True
+                    # no space added
+                elif val == TT.COMMA:
+                    # advance to next 14-char tab stop
+                    col = sum(len(p) for p in output_parts)
+                    spaces = 14 - (col % 14)
+                    output_parts.append(' ' * spaces)
+                    suppress_newline = True
+            else:
+                suppress_newline = False
+                value = self._eval(val, lineno)
+                if isinstance(value, float):
+                    # Avoid trailing .0 for whole numbers
+                    if value == int(value) and not math.isinf(value):
+                        output_parts.append(str(int(value)))
+                    else:
+                        output_parts.append(str(value))
+                elif isinstance(value, int):
+                    output_parts.append(str(value))
+                else:
+                    output_parts.append(str(value))
+
+        text = ''.join(output_parts)
+        if suppress_newline:
+            print(text, end='', flush=True)
+        else:
+            print(text)
+
+    # ------------------------------------------------------------------
+    # INPUT
+    # ------------------------------------------------------------------
+
+    def _exec_input(self, stmt: InputStmt, lineno: int):
+        prompt = stmt.prompt if stmt.prompt is not None else '? '
+        if not prompt.endswith(' ') and not prompt.endswith('?'):
+            prompt += ' '
+        try:
+            raw = input(prompt)
+        except EOFError:
+            raw = ''
+        # Determine type from variable name
+        name = stmt.var.name if isinstance(stmt.var, (VarNode, ArrayAccessNode)) else ''
+        if name.endswith('$'):
+            value = raw
+        else:
+            try:
+                value = float(raw)
+                if value == int(value):
+                    value = int(value)
+            except ValueError:
+                print('?Redo from start')
+                self._exec_input(stmt, lineno)
+                return
+        self._assign(stmt.var, value, lineno)
+
+    # ------------------------------------------------------------------
+    # FOR / NEXT
+    # ------------------------------------------------------------------
+
+    def _exec_for(self, stmt: ForStmt, lineno: int):
+        start = self._num(self._eval(stmt.start, lineno), lineno)
+        end   = self._num(self._eval(stmt.end,   lineno), lineno)
+        step  = self._num(self._eval(stmt.step,  lineno), lineno) if stmt.step else 1
+
+        if step == 0:
+            raise BasicError('FOR step cannot be zero', lineno)
+
+        self._vars[stmt.var] = start
+
+        # Remove any existing frame for this var
+        self._for_stack = [f for f in self._for_stack if f.var != stmt.var]
+
+        frame = _ForFrame(
+            var     = stmt.var,
+            end     = end,
+            step    = step,
+            loop_pc = self._pc,   # will be used by NEXT
+        )
+        self._for_stack.append(frame)
+
+        # Check if loop body should execute at all
+        if (step > 0 and start > end) or (step < 0 and start < end):
+            # Skip to matching NEXT
+            self._skip_to_next(stmt.var, lineno)
+
+    def _skip_to_next(self, var: str, lineno: int):
+        """Advance PC past the matching NEXT statement."""
+        depth = 0
+        search_pc = self._pc + 1
+        while search_pc < len(self._lines):
+            for stmt in self._lines[search_pc].stmts:
+                if isinstance(stmt, ForStmt):
+                    depth += 1
+                elif isinstance(stmt, NextStmt):
+                    if depth == 0:
+                        if stmt.var is None or stmt.var == var:
+                            self._pc = search_pc
+                            # Remove the frame since we're skipping
+                            self._for_stack = [
+                                f for f in self._for_stack if f.var != var
+                            ]
+                            return
+                        else:
+                            depth -= 1
+                    else:
+                        depth -= 1
+            search_pc += 1
+        raise BasicError(f'FOR without matching NEXT for {var}', lineno)
+
+    def _exec_next(self, stmt: NextStmt, lineno: int):
+        # Find the matching frame
+        if not self._for_stack:
+            raise BasicError('NEXT without FOR', lineno)
+
+        if stmt.var:
+            # Find frame with matching variable
+            frame = None
+            for f in reversed(self._for_stack):
+                if f.var == stmt.var:
+                    frame = f
+                    break
+            if frame is None:
+                raise BasicError(f'NEXT {stmt.var} without FOR', lineno)
+        else:
+            frame = self._for_stack[-1]
+
+        # Increment
+        current = self._num(self._vars.get(frame.var, 0), lineno)
+        current += frame.step
+        self._vars[frame.var] = current
+
+        # Check loop condition
+        continue_loop = (
+            (frame.step > 0 and current <= frame.end) or
+            (frame.step < 0 and current >= frame.end)
+        )
+        if continue_loop:
+            # Jump back to the line AFTER the FOR statement (loop body start)
+            self._pc = frame.loop_pc  # _run_loop will do +1, landing on body
+        else:
+            # Loop finished: pop the frame
+            self._for_stack = [f for f in self._for_stack if f is not frame]
+
+    # ------------------------------------------------------------------
+    # Variable access / assignment
+    # ------------------------------------------------------------------
+
+    def _assign(self, target: Any, value: Any, lineno: int):
+        if isinstance(target, VarNode):
+            name = target.name
+            if name.endswith('$'):
+                self._vars[name] = str(value)
+            else:
+                self._vars[name] = self._coerce_num(value, lineno)
+        elif isinstance(target, ArrayAccessNode):
+            idx = int(self._eval(target.index, lineno))
+            arr = self._get_array(target.name, lineno)
+            if idx < 0 or idx >= len(arr):
+                raise BasicError(
+                    f'Array index {idx} out of bounds for {target.name}', lineno
+                )
+            if target.name.endswith('$'):
+                arr[idx] = str(value)
+            else:
+                arr[idx] = self._coerce_num(value, lineno)
+        else:
+            raise BasicError(f'Cannot assign to {target}', lineno)
+
+    def _get_array(self, name: str, lineno: int) -> list:
+        if name not in self._arrays:
+            # Auto-dimension to 10 (BASIC default)
+            self._arrays[name] = [0] * 11
+        return self._arrays[name]
+
+    def _get_var(self, name: str) -> Any:
+        if name in self._vars:
+            return self._vars[name]
+        # Default values
+        if name.endswith('$'):
+            return ''
+        return 0
+
+    # ------------------------------------------------------------------
+    # Expression evaluator
+    # ------------------------------------------------------------------
+
+    def _eval(self, node: Any, lineno: int) -> Any:
+        if isinstance(node, NumberNode):
+            return node.value
+
+        if isinstance(node, StringNode):
+            return node.value
+
+        if isinstance(node, VarNode):
+            return self._get_var(node.name)
+
+        if isinstance(node, ArrayAccessNode):
+            arr = self._get_array(node.name, lineno)
+            idx = int(self._eval(node.index, lineno))
+            if idx < 0 or idx >= len(arr):
+                raise BasicError(
+                    f'Array index {idx} out of bounds for {node.name}', lineno
+                )
+            return arr[idx]
+
+        if isinstance(node, FuncCallNode):
+            return self._call_func(node.name, node.args, lineno)
+
+        if isinstance(node, UnaryOpNode):
+            operand = self._eval(node.operand, lineno)
+            if node.op == TT.MINUS:
+                return -self._num(operand, lineno)
+            if node.op == TT.NOT:
+                return 0 if self._truthy(operand) else -1
+            raise BasicError(f'Unknown unary op {node.op}', lineno)
+
+        if isinstance(node, BinOpNode):
+            return self._eval_binop(node, lineno)
+
+        raise BasicError(f'Unknown node type {type(node).__name__}', lineno)
+
+    def _eval_binop(self, node: BinOpNode, lineno: int) -> Any:
+        op = node.op
+
+        # Short-circuit logic
+        if op == TT.AND:
+            left = self._eval(node.left, lineno)
+            if not self._truthy(left):
+                return 0
+            right = self._eval(node.right, lineno)
+            return -1 if self._truthy(right) else 0
+
+        if op == TT.OR:
+            left = self._eval(node.left, lineno)
+            if self._truthy(left):
+                return -1
+            right = self._eval(node.right, lineno)
+            return -1 if self._truthy(right) else 0
+
+        left  = self._eval(node.left,  lineno)
+        right = self._eval(node.right, lineno)
+
+        # String concatenation
+        if op == TT.PLUS and (isinstance(left, str) or isinstance(right, str)):
+            return str(left) + str(right)
+
+        # Arithmetic ops
+        if op == TT.PLUS:
+            return self._num(left, lineno) + self._num(right, lineno)
+        if op == TT.MINUS:
+            return self._num(left, lineno) - self._num(right, lineno)
+        if op == TT.STAR:
+            return self._num(left, lineno) * self._num(right, lineno)
+        if op == TT.SLASH:
+            r = self._num(right, lineno)
+            if r == 0:
+                raise BasicError('Division by zero', lineno)
+            result = self._num(left, lineno) / r
+            # Return int if whole number
+            if result == int(result):
+                return int(result)
+            return result
+        if op == TT.CARET:
+            return self._num(left, lineno) ** self._num(right, lineno)
+        if op == TT.MOD:
+            r = self._num(right, lineno)
+            if r == 0:
+                raise BasicError('MOD by zero', lineno)
+            return int(self._num(left, lineno)) % int(r)
+
+        # Comparisons – work on both numbers and strings
+        if op == TT.EQ:
+            return -1 if left == right else 0
+        if op == TT.NEQ:
+            return -1 if left != right else 0
+        if op == TT.LT:
+            return -1 if left < right else 0
+        if op == TT.GT:
+            return -1 if left > right else 0
+        if op == TT.LTE:
+            return -1 if left <= right else 0
+        if op == TT.GTE:
+            return -1 if left >= right else 0
+
+        raise BasicError(f'Unknown binary op {op}', lineno)
+
+    # ------------------------------------------------------------------
+    # Built-in functions
+    # ------------------------------------------------------------------
+
+    def _call_func(self, name: str, args: list, lineno: int) -> Any:
+        evaled = [self._eval(a, lineno) for a in args]
+
+        def num(i=0):
+            return self._num(evaled[i], lineno)
+
+        def s(i=0):
+            v = evaled[i]
+            if not isinstance(v, str):
+                raise BasicError(f'{name}: expected string argument', lineno)
+            return v
+
+        def require(n: int):
+            if len(evaled) != n:
+                raise BasicError(
+                    f'{name} requires {n} argument(s), got {len(evaled)}', lineno
+                )
+
+        if name == 'INT':
+            require(1); return int(math.floor(num()))
+
+        if name == 'ABS':
+            require(1); return abs(num())
+
+        if name == 'SQR':
+            require(1)
+            v = num()
+            if v < 0:
+                raise BasicError('SQR of negative number', lineno)
+            return math.sqrt(v)
+
+        if name == 'RND':
+            # RND(1) or RND(n) – returns 0 <= x < 1
+            if len(evaled) == 0:
+                return random.random()
+            return random.random()
+
+        if name == 'LEN':
+            require(1); return len(s())
+
+        if name == 'LEFT$':
+            require(2); return s(0)[:int(num(1))]
+
+        if name == 'RIGHT$':
+            require(2)
+            n = int(num(1))
+            return s(0)[-n:] if n > 0 else ''
+
+        if name == 'MID$':
+            if len(evaled) not in (2, 3):
+                raise BasicError('MID$ requires 2 or 3 arguments', lineno)
+            src = s(0)
+            start = int(num(1)) - 1  # BASIC is 1-based
+            start = max(0, start)
+            if len(evaled) == 3:
+                length = int(num(2))
+                return src[start:start + length]
+            return src[start:]
+
+        if name == 'STR$':
+            require(1)
+            v = num()
+            if v == int(v):
+                return str(int(v))
+            return str(v)
+
+        if name == 'VAL':
+            require(1)
+            raw = s().strip()
+            try:
+                v = float(raw)
+                return int(v) if v == int(v) else v
+            except ValueError:
+                return 0
+
+        if name == 'CHR$':
+            require(1)
+            return chr(int(num()))
+
+        if name == 'ASC':
+            require(1)
+            sv = s()
+            if not sv:
+                raise BasicError('ASC of empty string', lineno)
+            return ord(sv[0])
+
+        if name == 'TAB':
+            require(1)
+            # Returns enough spaces to reach column n (1-based)
+            # We approximate by just returning spaces
+            n = max(0, int(num()) - 1)
+            return '\t' + (' ' * n)   # crude approximation
+
+        if name == 'SGN':
+            require(1)
+            v = num()
+            return 1 if v > 0 else (-1 if v < 0 else 0)
+
+        if name == 'FIX':
+            require(1)
+            v = num()
+            return int(v)  # truncate toward zero
+
+        if name == 'LOG':
+            require(1)
+            v = num()
+            if v <= 0:
+                raise BasicError('LOG of non-positive number', lineno)
+            return math.log(v)
+
+        if name == 'EXP':
+            require(1); return math.exp(num())
+
+        if name == 'SIN':
+            require(1); return math.sin(num())
+
+        if name == 'COS':
+            require(1); return math.cos(num())
+
+        if name == 'TAN':
+            require(1); return math.tan(num())
+
+        if name == 'ATN':
+            require(1); return math.atan(num())
+
+        raise BasicError(f'Unknown function: {name}', lineno)
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    def _resolve_lineno(self, lineno: int, current: int) -> int:
+        if lineno not in self._line_map:
+            raise BasicError(f'Undefined line number {lineno}', current)
+        return self._line_map[lineno]
+
+    @staticmethod
+    def _truthy(val: Any) -> bool:
+        if isinstance(val, str):
+            return val != ''
+        return val != 0
+
+    def _num(self, val: Any, lineno: int) -> float | int:
+        if isinstance(val, (int, float)):
+            return val
+        if isinstance(val, str):
+            try:
+                v = float(val)
+                return int(v) if v == int(v) else v
+            except ValueError:
+                raise BasicError(f'Expected number, got string {val!r}', lineno)
+        raise BasicError(f'Expected number, got {type(val).__name__}', lineno)
+
+    def _coerce_num(self, value: Any, lineno: int) -> float | int:
+        if isinstance(value, (int, float)):
+            return value
+        if isinstance(value, str):
+            try:
+                v = float(value)
+                return int(v) if v == int(v) else v
+            except ValueError:
+                raise BasicError(
+                    f'Cannot convert {value!r} to number', lineno
+                )
+        return value
+
+    def _decompile_line(self, line: Line) -> str:
+        """Return the original source text for the LIST command."""
+        return f'{line.lineno} {line.source}'
