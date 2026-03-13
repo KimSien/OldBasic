@@ -595,3 +595,70 @@ class TestFuncDateTimeStr:
         import re
         result = run("10 PRINT TIME$()")
         assert re.match(r'\d{2}:\d{2}:\d{2}\n', result)
+
+# ===========================================================================
+# 未テスト項目の補完
+# ===========================================================================
+
+class TestInput:
+    def test_numeric_input(self):
+        src = "10 INPUT X\n20 PRINT X"
+        with patch("builtins.input", return_value="42"):
+            assert run(src) == "42\n"
+
+    def test_string_input(self):
+        src = '10 INPUT A$\n20 PRINT A$'
+        with patch("builtins.input", return_value="hello"):
+            assert run(src) == "hello\n"
+
+    def test_input_with_prompt(self):
+        src = '10 INPUT "名前: "; N$\n20 PRINT N$'
+        with patch("builtins.input", return_value="TARO") as mock_input:
+            assert run(src) == "TARO\n"
+            mock_input.assert_called_once()
+
+
+class TestTab:
+    def test_tab_in_print(self):
+        result = run('10 PRINT "A"; TAB(5); "B"')
+        # TAB(5) produces a tab + spaces; "B" must appear after "A"
+        assert result.startswith("A")
+        assert "B" in result
+
+    def test_tab_value(self):
+        # TAB(1) → '\t' + '' (0 spaces)
+        result = run('10 PRINT TAB(1); "X"')
+        assert "X" in result
+
+
+class TestPrintComma:
+    def test_comma_advances_to_next_tabstop(self):
+        # Comma advances to next 14-char tab stop
+        result = run('10 PRINT "A", "B"')
+        assert result.startswith("A")
+        # "B" is padded to 14-char column
+        assert "B" in result
+        assert len(result.rstrip("\n")) >= 14 + 1
+
+
+class TestInkeyDollar:
+    def test_returns_empty_when_no_input(self):
+        # When stdin has no data, INKEY$() returns ''
+        import io
+        with patch("sys.stdin", io.StringIO("")):
+            result = run('10 LET K$ = INKEY$()\n20 PRINT LEN(K$)')
+        assert result == "0\n"
+
+
+class TestInputDollar:
+    def test_reads_n_chars(self):
+        import io
+        with patch("sys.stdin", io.StringIO("ABCDE")):
+            result = run('10 LET S$ = INPUT$(3)\n20 PRINT S$')
+        assert result == "ABC\n"
+
+    def test_reads_fewer_on_eof(self):
+        import io
+        with patch("sys.stdin", io.StringIO("AB")):
+            result = run('10 LET S$ = INPUT$(5)\n20 PRINT LEN(S$)')
+        assert result == "2\n"
