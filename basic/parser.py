@@ -143,6 +143,34 @@ class RestoreStmt:
     pass
 
 @dataclass
+class WhileStmt:
+    condition: Any
+
+@dataclass
+class WendStmt:
+    pass
+
+@dataclass
+class RandomizeStmt:
+    seed: Any = None    # None = use system time
+
+@dataclass
+class OnGotoStmt:
+    expr: Any
+    targets: list       # list of int line numbers
+
+@dataclass
+class OnGosubStmt:
+    expr: Any
+    targets: list       # list of int line numbers
+
+@dataclass
+class DefFnStmt:
+    name: str           # e.g. "FNSQR"
+    param: str          # parameter variable name
+    body: Any           # expression node
+
+@dataclass
 class Line:
     lineno: int
     stmts: list
@@ -296,6 +324,16 @@ class Parser:
             return self._parse_read()
         elif tt == TT.RESTORE:
             self._advance(); return RestoreStmt()
+        elif tt == TT.WHILE:
+            return self._parse_while()
+        elif tt == TT.WEND:
+            self._advance(); return WendStmt()
+        elif tt == TT.RANDOMIZE:
+            return self._parse_randomize()
+        elif tt == TT.ON:
+            return self._parse_on()
+        elif tt == TT.DEF:
+            return self._parse_def_fn()
         elif tt == TT.IDENT:
             # Could be assignment  VAR = expr  or  VAR(idx) = expr
             return self._parse_assign()
@@ -455,6 +493,55 @@ class Parser:
             vars_.append(self._parse_lvalue())
         return ReadStmt(vars_)
 
+    def _parse_while(self):
+        self._advance()  # consume WHILE
+        condition = self._parse_expression()
+        return WhileStmt(condition)
+
+    def _parse_randomize(self):
+        self._advance()  # consume RANDOMIZE
+        # Optional seed expression
+        if self._match(TT.EOF, TT.COLON):
+            return RandomizeStmt(None)
+        seed = self._parse_expression()
+        return RandomizeStmt(seed)
+
+    def _parse_on(self):
+        self._advance()  # consume ON
+        expr = self._parse_expression()
+        if self._match(TT.GOTO):
+            self._advance()
+            targets = [int(self._expect(TT.NUMBER).value)]
+            while self._match(TT.COMMA):
+                self._advance()
+                targets.append(int(self._expect(TT.NUMBER).value))
+            return OnGotoStmt(expr, targets)
+        elif self._match(TT.GOSUB):
+            self._advance()
+            targets = [int(self._expect(TT.NUMBER).value)]
+            while self._match(TT.COMMA):
+                self._advance()
+                targets.append(int(self._expect(TT.NUMBER).value))
+            return OnGosubStmt(expr, targets)
+        else:
+            raise ParseError(
+                f'Line {self._lineno}: expected GOTO or GOSUB after ON expr'
+            )
+
+    def _parse_def_fn(self):
+        self._advance()  # consume DEF
+        fn_name = self._expect(TT.IDENT).value
+        if not fn_name.startswith('FN'):
+            raise ParseError(
+                f'Line {self._lineno}: DEF must be followed by FN<name>'
+            )
+        self._expect(TT.LPAREN)
+        param = self._expect(TT.IDENT).value
+        self._expect(TT.RPAREN)
+        self._expect(TT.EQ)
+        body = self._parse_expression()
+        return DefFnStmt(fn_name, param, body)
+
     # ------------------------------------------------------------------
     # Expressions
     # ------------------------------------------------------------------
@@ -551,8 +638,8 @@ class Parser:
                         self._advance()
                         args.append(self._parse_expression())
                 self._expect(TT.RPAREN)
-                # Determine whether it's a built-in function or array access
-                if name in _BUILTIN_FUNCS:
+                # Determine whether it's a built-in, user-defined, or array
+                if name in _BUILTIN_FUNCS or name.startswith('FN'):
                     return FuncCallNode(name, args)
                 else:
                     # Array access (single index)
@@ -576,12 +663,21 @@ class Parser:
 
 # Set of known built-in function names (uppercase)
 _BUILTIN_FUNCS = {
+    # Original
     'INT', 'ABS', 'SQR', 'RND', 'LEN',
     'LEFT$', 'RIGHT$', 'MID$',
     'STR$', 'VAL', 'CHR$', 'ASC',
     'TAB',
-    # extra math
     'SGN', 'FIX', 'LOG', 'EXP', 'SIN', 'COS', 'TAN', 'ATN',
+    # New string functions
+    'INSTR', 'SPACE$', 'STRING$', 'UCASE$', 'LCASE$',
+    'LTRIM$', 'RTRIM$', 'HEX$', 'OCT$',
+    # New numeric functions
+    'CINT', 'CLNG', 'CSNG', 'CDBL',
+    # New I/O functions
+    'INKEY$', 'INPUT$', 'SPC', 'POS', 'CSRLIN',
+    # New system functions
+    'TIMER', 'DATE$', 'TIME$',
 }
 
 import re

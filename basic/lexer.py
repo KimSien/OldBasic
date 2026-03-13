@@ -38,6 +38,11 @@ class TT(Enum):
     OR        = auto()
     NOT       = auto()
     MOD       = auto()
+    WHILE     = auto()
+    WEND      = auto()
+    RANDOMIZE = auto()
+    ON        = auto()
+    DEF       = auto()
 
     # Operators / punctuation
     PLUS      = auto()
@@ -81,10 +86,15 @@ _KEYWORDS = {
     'DATA':    TT.DATA,
     'READ':    TT.READ,
     'RESTORE': TT.RESTORE,
-    'AND':     TT.AND,
-    'OR':      TT.OR,
-    'NOT':     TT.NOT,
-    'MOD':     TT.MOD,
+    'AND':       TT.AND,
+    'OR':        TT.OR,
+    'NOT':       TT.NOT,
+    'MOD':       TT.MOD,
+    'WHILE':     TT.WHILE,
+    'WEND':      TT.WEND,
+    'RANDOMIZE': TT.RANDOMIZE,
+    'ON':        TT.ON,
+    'DEF':       TT.DEF,
 }
 
 

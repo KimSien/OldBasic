@@ -15,9 +15,11 @@ Execution model
 
 from __future__ import annotations
 
+import datetime
 import math
 import random
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -31,6 +33,8 @@ from .parser import (
     ForStmt, NextStmt,
     EndStmt, StopStmt,
     DimStmt, DataStmt, ReadStmt, RestoreStmt,
+    WhileStmt, WendStmt, RandomizeStmt,
+    OnGotoStmt, OnGosubStmt, DefFnStmt,
 )
 from .lexer import TT
 
@@ -74,6 +78,12 @@ class _ForFrame:
     end:     float
     step:    float
     loop_pc: int   # PC of the FOR line (we jump back here on NEXT)
+
+
+@dataclass
+class _WhileFrame:
+    condition: object   # AST node, re-evaluated on each WEND
+    loop_pc:   int      # PC of the WHILE line
 
 
 # ---------------------------------------------------------------------------
@@ -140,15 +150,17 @@ class Interpreter:
     # ------------------------------------------------------------------
 
     def _reset(self):
-        self._lines:      list[Line]        = []
-        self._line_map:   dict[int, int]    = {}
-        self._vars:       dict[str, Any]    = {}
-        self._arrays:     dict[str, list]   = {}
-        self._gosub_stack: list[int]        = []  # stack of return PCs
-        self._for_stack:  list[_ForFrame]   = []
-        self._data:       list[Any]         = []
-        self._data_ptr:   int               = 0
-        self._pc:         int               = 0
+        self._lines:       list[Line]        = []
+        self._line_map:    dict[int, int]    = {}
+        self._vars:        dict[str, Any]    = {}
+        self._arrays:      dict[str, list]   = {}
+        self._gosub_stack: list[int]         = []  # stack of return PCs
+        self._for_stack:   list[_ForFrame]   = []
+        self._while_stack: list[_WhileFrame] = []
+        self._user_funcs:  dict[str, tuple]  = {}  # name -> (param, body_node)
+        self._data:        list[Any]         = []
+        self._data_ptr:    int               = 0
+        self._pc:          int               = 0
 
     # ------------------------------------------------------------------
     # DATA collection
@@ -286,6 +298,38 @@ class Interpreter:
 
         if isinstance(stmt, RestoreStmt):
             self._data_ptr = 0
+            return
+
+        if isinstance(stmt, WhileStmt):
+            self._exec_while(stmt, lineno)
+            return
+
+        if isinstance(stmt, WendStmt):
+            self._exec_wend(lineno)
+            return
+
+        if isinstance(stmt, RandomizeStmt):
+            if stmt.seed is None:
+                random.seed(int(time.time()))
+            else:
+                seed_val = self._num(self._eval(stmt.seed, lineno), lineno)
+                random.seed(int(seed_val))
+            return
+
+        if isinstance(stmt, OnGotoStmt):
+            idx = int(self._num(self._eval(stmt.expr, lineno), lineno))
+            if 1 <= idx <= len(stmt.targets):
+                raise _GotoSignal(stmt.targets[idx - 1])
+            return
+
+        if isinstance(stmt, OnGosubStmt):
+            idx = int(self._num(self._eval(stmt.expr, lineno), lineno))
+            if 1 <= idx <= len(stmt.targets):
+                raise _GosubSignal(stmt.targets[idx - 1])
+            return
+
+        if isinstance(stmt, DefFnStmt):
+            self._user_funcs[stmt.name] = (stmt.param, stmt.body)
             return
 
         raise BasicError(f'Unknown statement type {type(stmt).__name__}', lineno)
@@ -445,6 +489,50 @@ class Interpreter:
         else:
             # Loop finished: pop the frame
             self._for_stack = [f for f in self._for_stack if f is not frame]
+
+    # ------------------------------------------------------------------
+    # WHILE / WEND
+    # ------------------------------------------------------------------
+
+    def _exec_while(self, stmt: WhileStmt, lineno: int):
+        cond = self._eval(stmt.condition, lineno)
+        if self._truthy(cond):
+            # Push a frame only on first entry (not on re-entry from WEND)
+            if not self._while_stack or self._while_stack[-1].loop_pc != self._pc:
+                self._while_stack.append(_WhileFrame(stmt.condition, self._pc))
+        else:
+            # Remove stale frame for this PC if present
+            if self._while_stack and self._while_stack[-1].loop_pc == self._pc:
+                self._while_stack.pop()
+            self._skip_to_wend(lineno)
+
+    def _exec_wend(self, lineno: int):
+        if not self._while_stack:
+            raise BasicError('WEND without WHILE', lineno)
+        frame = self._while_stack[-1]
+        cond = self._eval(frame.condition, lineno)
+        if self._truthy(cond):
+            # Jump back to body (loop_pc + 1); set to loop_pc so +1 lands there
+            self._pc = frame.loop_pc
+        else:
+            self._while_stack.pop()
+            # Fall through: run_loop does +1, advancing past WEND
+
+    def _skip_to_wend(self, lineno: int):
+        """Advance PC to the matching WEND, accounting for nesting."""
+        depth = 0
+        search_pc = self._pc + 1
+        while search_pc < len(self._lines):
+            for stmt in self._lines[search_pc].stmts:
+                if isinstance(stmt, WhileStmt):
+                    depth += 1
+                elif isinstance(stmt, WendStmt):
+                    if depth == 0:
+                        self._pc = search_pc
+                        return
+                    depth -= 1
+            search_pc += 1
+        raise BasicError('WHILE without matching WEND', lineno)
 
     # ------------------------------------------------------------------
     # Variable access / assignment
@@ -717,6 +805,153 @@ class Interpreter:
 
         if name == 'ATN':
             require(1); return math.atan(num())
+
+        # ------------------------------------------------------------------
+        # New string functions
+        # ------------------------------------------------------------------
+
+        if name == 'INSTR':
+            if len(evaled) == 2:
+                haystack, needle = s(0), evaled[1]
+                if not isinstance(needle, str):
+                    raise BasicError('INSTR: second argument must be a string', lineno)
+                pos = haystack.find(needle)
+                return 0 if pos == -1 else pos + 1
+            elif len(evaled) == 3:
+                start = int(num(0)) - 1  # 1-based → 0-based
+                haystack, needle = s(1), evaled[2]
+                if not isinstance(needle, str):
+                    raise BasicError('INSTR: third argument must be a string', lineno)
+                pos = haystack.find(needle, max(0, start))
+                return 0 if pos == -1 else pos + 1
+            else:
+                raise BasicError('INSTR requires 2 or 3 arguments', lineno)
+
+        if name == 'SPACE$':
+            require(1); return ' ' * max(0, int(num()))
+
+        if name == 'STRING$':
+            require(2)
+            n = max(0, int(num(0)))
+            c = evaled[1]
+            if isinstance(c, str):
+                ch = c[0] if c else ''
+            else:
+                ch = chr(int(c))
+            return ch * n
+
+        if name == 'UCASE$':
+            require(1); return s().upper()
+
+        if name == 'LCASE$':
+            require(1); return s().lower()
+
+        if name == 'LTRIM$':
+            require(1); return s().lstrip()
+
+        if name == 'RTRIM$':
+            require(1); return s().rstrip()
+
+        if name == 'HEX$':
+            require(1); return hex(int(num()))[2:].upper()
+
+        if name == 'OCT$':
+            require(1); return oct(int(num()))[2:]
+
+        # ------------------------------------------------------------------
+        # New numeric / type-conversion functions
+        # ------------------------------------------------------------------
+
+        if name == 'CINT':
+            require(1); return int(round(num()))
+
+        if name == 'CLNG':
+            require(1); return int(num())
+
+        if name == 'CSNG':
+            require(1); return float(num())
+
+        if name == 'CDBL':
+            require(1); return float(num())
+
+        # ------------------------------------------------------------------
+        # New I/O functions
+        # ------------------------------------------------------------------
+
+        if name == 'SPC':
+            require(1); return ' ' * max(0, int(num()))
+
+        if name == 'INKEY$':
+            if len(evaled) != 0:
+                raise BasicError('INKEY$ takes no arguments', lineno)
+            try:
+                import select
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    return sys.stdin.read(1)
+            except Exception:
+                pass
+            return ''
+
+        if name == 'INPUT$':
+            require(1)
+            n = max(0, int(num()))
+            try:
+                result = ''
+                for _ in range(n):
+                    ch = sys.stdin.read(1)
+                    if not ch:
+                        break
+                    result += ch
+                return result
+            except EOFError:
+                return ''
+
+        if name == 'POS':
+            # Cursor column position — not trackable in plain text mode
+            return 0
+
+        if name == 'CSRLIN':
+            # Cursor row position — not trackable in plain text mode
+            return 0
+
+        # ------------------------------------------------------------------
+        # New system / date-time functions
+        # ------------------------------------------------------------------
+
+        if name == 'TIMER':
+            if len(evaled) != 0:
+                raise BasicError('TIMER takes no arguments', lineno)
+            now = datetime.datetime.now()
+            return now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1_000_000
+
+        if name == 'DATE$':
+            if len(evaled) != 0:
+                raise BasicError('DATE$ takes no arguments', lineno)
+            now = datetime.datetime.now()
+            return now.strftime('%m-%d-%Y')
+
+        if name == 'TIME$':
+            if len(evaled) != 0:
+                raise BasicError('TIME$ takes no arguments', lineno)
+            now = datetime.datetime.now()
+            return now.strftime('%H:%M:%S')
+
+        # ------------------------------------------------------------------
+        # User-defined functions  DEF FN...
+        # ------------------------------------------------------------------
+
+        if name in self._user_funcs:
+            param_name, body = self._user_funcs[name]
+            if len(evaled) != 1:
+                raise BasicError(f'{name} requires 1 argument', lineno)
+            old_val = self._vars.get(param_name)
+            self._vars[param_name] = evaled[0]
+            result = self._eval(body, lineno)
+            if old_val is None:
+                self._vars.pop(param_name, None)
+            else:
+                self._vars[param_name] = old_val
+            return result
 
         raise BasicError(f'Unknown function: {name}', lineno)
 

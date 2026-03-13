@@ -398,3 +398,200 @@ class TestFuncTrig:
     def test_atn_one(self):
         result = run("10 PRINT ATN(1)")
         assert float(result.strip()) == pytest.approx(math.pi / 4)
+
+# ===========================================================================
+# New Statements
+# ===========================================================================
+
+class TestWhileWend:
+    def test_basic_loop(self):
+        src = "10 LET I = 1\n20 WHILE I <= 3\n30 PRINT I\n40 LET I = I + 1\n50 WEND"
+        assert run(src) == "1\n2\n3\n"
+
+    def test_skips_when_false(self):
+        src = "10 LET I = 5\n20 WHILE I < 3\n30 PRINT I\n40 WEND\n50 PRINT \"done\""
+        assert run(src) == "done\n"
+
+    def test_nested_while(self):
+        src = (
+            "10 LET I = 1\n"
+            "20 WHILE I <= 2\n"
+            "30 LET J = 1\n"
+            "40 WHILE J <= 2\n"
+            "50 PRINT I * 10 + J\n"
+            "60 LET J = J + 1\n"
+            "70 WEND\n"
+            "80 LET I = I + 1\n"
+            "90 WEND"
+        )
+        assert run(src) == "11\n12\n21\n22\n"
+
+    def test_wend_without_while_raises(self):
+        from basic.interpreter import BasicError
+        with pytest.raises(BasicError):
+            run("10 WEND")
+
+
+class TestRandomize:
+    def test_randomize_with_seed(self):
+        # Same seed → same RND sequence
+        src1 = "10 RANDOMIZE 42\n20 PRINT RND(1)"
+        src2 = "10 RANDOMIZE 42\n20 PRINT RND(1)"
+        assert run(src1) == run(src2)
+
+    def test_randomize_no_arg(self):
+        # Should not raise
+        run("10 RANDOMIZE\n20 PRINT RND(1)")
+
+
+class TestOnGoto:
+    def test_on_goto_first(self):
+        src = "10 ON 1 GOTO 100,200,300\n100 PRINT \"one\"\n200 PRINT \"two\"\n300 PRINT \"three\""
+        assert run(src) == "one\ntwo\nthree\n"
+
+    def test_on_goto_second(self):
+        src = "10 ON 2 GOTO 100,200,300\n20 END\n100 PRINT \"one\"\n110 END\n200 PRINT \"two\"\n210 END\n300 PRINT \"three\""
+        assert run(src) == "two\n"
+
+    def test_on_goto_out_of_range(self):
+        # Out of range → no jump, continue
+        src = "10 ON 5 GOTO 100,200\n20 PRINT \"ok\"\n30 END\n100 PRINT \"jumped\""
+        assert run(src) == "ok\n"
+
+
+class TestOnGosub:
+    def test_on_gosub(self):
+        src = (
+            "10 ON 2 GOSUB 100,200\n"
+            "20 PRINT \"back\"\n"
+            "30 END\n"
+            "100 PRINT \"sub1\"\n110 RETURN\n"
+            "200 PRINT \"sub2\"\n210 RETURN\n"
+        )
+        assert run(src) == "sub2\nback\n"
+
+
+class TestDefFn:
+    def test_simple_function(self):
+        src = "10 DEF FNSQ(X) = X * X\n20 PRINT FNSQ(5)"
+        assert run(src) == "25\n"
+
+    def test_function_with_expression(self):
+        src = "10 DEF FNDBL(N) = N * 2\n20 PRINT FNDBL(7)"
+        assert run(src) == "14\n"
+
+    def test_function_does_not_clobber_outer_var(self):
+        src = "10 LET X = 99\n20 DEF FNTEST(X) = X + 1\n30 PRINT FNTEST(5)\n40 PRINT X"
+        assert run(src) == "6\n99\n"
+
+
+# ===========================================================================
+# New Built-in Functions
+# ===========================================================================
+
+class TestFuncInstr:
+    def test_found(self):
+        assert run('10 PRINT INSTR("HELLO", "LL")') == "3\n"
+
+    def test_not_found(self):
+        assert run('10 PRINT INSTR("HELLO", "XY")') == "0\n"
+
+    def test_with_start(self):
+        assert run('10 PRINT INSTR(4, "ABCABC", "A")') == "4\n"
+
+
+class TestFuncSpaceStr:
+    def test_space(self):
+        assert run('10 PRINT SPACE$(3)') == "   \n"
+
+    def test_space_zero(self):
+        assert run('10 PRINT SPACE$(0)') == "\n"
+
+
+class TestFuncStringDollar:
+    def test_char_code(self):
+        assert run('10 PRINT STRING$(4, 65)') == "AAAA\n"
+
+    def test_char_string(self):
+        assert run('10 PRINT STRING$(3, "-")') == "---\n"
+
+
+class TestFuncUcaseLcase:
+    def test_ucase(self):
+        assert run('10 PRINT UCASE$("hello")') == "HELLO\n"
+
+    def test_lcase(self):
+        assert run('10 PRINT LCASE$("WORLD")') == "world\n"
+
+
+class TestFuncLtrimRtrim:
+    def test_ltrim(self):
+        assert run('10 PRINT LTRIM$("  hi")') == "hi\n"
+
+    def test_rtrim(self):
+        assert run('10 PRINT RTRIM$("hi  ")') == "hi\n"
+
+
+class TestFuncHexOct:
+    def test_hex(self):
+        assert run("10 PRINT HEX$(255)") == "FF\n"
+
+    def test_oct(self):
+        assert run("10 PRINT OCT$(8)") == "10\n"
+
+
+class TestFuncCint:
+    def test_round_up(self):
+        assert run("10 PRINT CINT(3.6)") == "4\n"
+
+    def test_round_down(self):
+        assert run("10 PRINT CINT(3.4)") == "3\n"
+
+    def test_negative(self):
+        assert run("10 PRINT CINT(-2.7)") == "-3\n"
+
+
+class TestFuncTypeConversion:
+    def test_clng(self):
+        assert run("10 PRINT CLNG(3.9)") == "3\n"
+
+    def test_csng(self):
+        result = run("10 PRINT CSNG(3)")
+        assert float(result.strip()) == pytest.approx(3.0)
+
+    def test_cdbl(self):
+        result = run("10 PRINT CDBL(3)")
+        assert float(result.strip()) == pytest.approx(3.0)
+
+
+class TestFuncSpc:
+    def test_spc(self):
+        assert run('10 PRINT "A"; SPC(3); "B"') == "A   B\n"
+
+
+class TestFuncPos:
+    def test_pos_returns_zero(self):
+        assert run("10 PRINT POS(0)") == "0\n"
+
+
+class TestFuncCsrlin:
+    def test_csrlin_returns_zero(self):
+        assert run("10 PRINT CSRLIN()") == "0\n"
+
+
+class TestFuncTimer:
+    def test_timer_returns_number(self):
+        src = "10 LET T = TIMER()\n20 PRINT (T >= 0)"
+        assert run(src) == "-1\n"
+
+
+class TestFuncDateTimeStr:
+    def test_date_format(self):
+        import re
+        result = run("10 PRINT DATE$()")
+        assert re.match(r'\d{2}-\d{2}-\d{4}\n', result)
+
+    def test_time_format(self):
+        import re
+        result = run("10 PRINT TIME$()")
+        assert re.match(r'\d{2}:\d{2}:\d{2}\n', result)
