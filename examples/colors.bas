@@ -1,0 +1,17 @@
+10 REM colors.bas - 16色パレット一覧
+20 SCREEN 1
+30 CLS
+40 REM 16色を4x4のグリッドで表示
+50 FOR C = 0 TO 15
+60   LET COL = C MOD 4
+70   LET ROW = INT(C / 4)
+80   LET X1 = COL * 80
+90   LET Y1 = ROW * 50
+100  LET X2 = X1 + 70
+110  LET Y2 = Y1 + 40
+120  LINE (X1, Y1)-(X2, Y2), C, BF
+130 NEXT C
+140 REM 枠線
+150 LINE (0, 0)-(319, 199), 15, B
+160 PRINT "16色パレット"
+170 END

@@ -1,0 +1,34 @@
+10 REM bounce.bas - バウンドするボールアニメーション
+20 REM DO/LOOP + TIMER() でゲームループを実現
+30 SCREEN 1
+40 CLS
+50 REM 初期値
+60 LET BX = 160
+70 LET BY = 100
+80 LET DX = 3
+90 LET DY = 2
+100 LET R = 8
+110 LET FRAMES = 0
+120 LET T0 = TIMER()
+130 REM ゲームループ（200フレーム）
+140 DO WHILE FRAMES < 200
+150   REM 前フレームのボールを消す
+160   CIRCLE (BX, BY), R, 0
+170   CIRCLE (BX, BY), R - 1, 0
+180   REM 位置更新
+190   LET BX = BX + DX
+200   LET BY = BY + DY
+210   REM 壁との衝突
+220   IF BX - R < 0 THEN DX = ABS(DX)
+230   IF BX + R > 319 THEN DX = -ABS(DX)
+240   IF BY - R < 0 THEN DY = ABS(DY)
+250   IF BY + R > 199 THEN DY = -ABS(DY)
+260   REM ボールを描く
+270   CIRCLE (BX, BY), R, 14
+280   CIRCLE (BX, BY), R - 1, 6
+290   LET FRAMES = FRAMES + 1
+300 LOOP
+310 REM 結果表示
+320 LET T1 = TIMER()
+330 PRINT "Done!"; FRAMES; "frames in"; INT((T1 - T0) * 10) / 10; "sec"
+340 END

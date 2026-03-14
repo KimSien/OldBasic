@@ -13,6 +13,7 @@
     #btn-run:hover  { background: #e94560; }
     #btn-clear { background: #333; color: #ccc; }
     #status { font-size: 0.8rem; color: #aaa; margin-left: auto; }
+    select { background: #0d0d1a; color: #a8ff78; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px; font-family: monospace; font-size: 0.85rem; cursor: pointer; }
     main { display: flex; flex: 1; overflow: hidden; }
     #editor-panel { display: flex; flex-direction: column; width: 380px; min-width: 200px; border-right: 1px solid #0f3460; }
     #code { flex: 1; background: #0d0d1a; color: #a8ff78; border: none; padding: 12px; font-family: monospace; font-size: 0.85rem; resize: none; outline: none; }
@@ -25,6 +26,14 @@
 <body>
 <header>
   <h1>BASIC Interpreter</h1>
+  <select id="sample-select">
+    <option value="">-- サンプル --</option>
+    <option value="colors">colors.bas — 16色パレット</option>
+    <option value="shapes">shapes.bas — 図形描画</option>
+    <option value="gradient">gradient.bas — グラデーション＋サイン波</option>
+    <option value="bounce">bounce.bas — バウンドボール</option>
+    <option value="sprite">sprite.bas — スプライト移動</option>
+  </select>
   <button id="btn-run">&#9654; RUN</button>
   <button id="btn-clear">CLR</button>
   <span id="status">Pyodide を読み込み中...</span>
@@ -159,6 +168,19 @@ _output = _out_buf.getvalue()
 
 btnClear.addEventListener('click', () => {
   consoleEl.textContent = '';
+});
+
+document.getElementById('sample-select').addEventListener('change', async (e) => {
+  const name = e.target.value;
+  if (!name) return;
+  try {
+    const resp = await fetch('../examples/' + name + '.bas');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    document.getElementById('code').value = await resp.text();
+    e.target.value = '';
+  } catch (err) {
+    log('サンプル読み込みエラー: ' + err.message, '#e94560');
+  }
 });
 
 init();

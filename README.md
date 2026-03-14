@@ -1,14 +1,20 @@
 # 構成
-- basic.py — CLIエントリポイント
-- basic/lexer.py — トークナイザー
-- basic/parser.py — 再帰降下パーサー（AST生成）
-- basic/interpreter.py — ツリーウォーク型インタープリタ
-- tests/test_interpreter.py — pytestテストスイート
+- `basic.py` — CLIエントリポイント
+- `basic/lexer.py` — トークナイザー
+- `basic/parser.py` — 再帰降下パーサー（AST生成）
+- `basic/interpreter.py` — ツリーウォーク型インタープリタ
+- `basic/renderer.py` — グラフィクス・サウンド出力の抽象レイヤー（`Renderer` / `NullRenderer`）
+- `web/index.html` — ブラウザUI（Pyodide + Canvas）
+- `web/canvas_renderer.py` — ブラウザ用 `CanvasRenderer`（Pyodide）
+- `tests/test_interpreter.py` — 言語機能のテストスイート
+- `tests/test_graphics.py` — グラフィクス・サウンド・ループのテストスイート
 
 
 # サポートする構文
 
 ## ステートメント
+
+### 基本
 | 構文 | 説明 | 例 |
 |---|---|---|
 | `PRINT` | 値を出力する。`,` で桁揃え、`;` で連結 | `PRINT "A"; TAB(10); "B"` |
@@ -19,6 +25,7 @@
 | `GOSUB / RETURN` | サブルーチン呼び出しと復帰 | `GOSUB 500` |
 | `FOR / NEXT` | カウントループ（`STEP` 対応） | `FOR I = 1 TO 10 STEP 2` |
 | `WHILE / WEND` | 条件ループ | `WHILE I < 10 ... WEND` |
+| `DO / LOOP` | 条件ループ（4バリアント） | `DO WHILE X > 0 ... LOOP` |
 | `ON ... GOTO` | 式の値で行番号へ分岐 | `ON N GOTO 100,200,300` |
 | `ON ... GOSUB` | 式の値でサブルーチンへ分岐 | `ON N GOSUB 100,200,300` |
 | `DIM` | 配列を宣言する（1始まり） | `DIM A(10)` |
@@ -28,6 +35,30 @@
 | `END` | プログラムを即時終了する | `END` |
 | `STOP` | 実行を停止する（デバッグ用） | `STOP` |
 | `REM` | コメント | `REM これはコメント` |
+
+### グラフィクス
+| 構文 | 説明 | 例 |
+|---|---|---|
+| `SCREEN n` | グラフィクスモード切替（1/7/9/12/13） | `SCREEN 13` |
+| `CLS` | 画面クリア | `CLS` |
+| `PSET (x,y), color` | 1ピクセル描画 | `PSET (100, 80), 4` |
+| `LINE (x1,y1)-(x2,y2), color` | 直線描画 | `LINE (0,0)-(100,100), 15` |
+| `LINE (x1,y1)-(x2,y2), color, B` | 矩形描画 | `LINE (10,10)-(90,90), 7, B` |
+| `LINE (x1,y1)-(x2,y2), color, BF` | 塗りつぶし矩形 | `LINE (10,10)-(90,90), 2, BF` |
+| `CIRCLE (x,y), r, color` | 円・楕円・円弧描画 | `CIRCLE (160,100), 50, 14` |
+| `PAINT (x,y), color` | 領域塗りつぶし | `PAINT (50, 50), 3` |
+| `GET (x1,y1)-(x2,y2), array` | 画面領域を配列へ取得 | `GET (0,0)-(15,15), SPR` |
+| `PUT (x,y), array [,mode]` | 配列を画面へ描画 | `PUT (X,Y), SPR, XOR` |
+
+### 色・サウンド
+| 構文 | 説明 | 例 |
+|---|---|---|
+| `COLOR fg [, bg]` | 前景色・背景色の設定 | `COLOR 14, 1` |
+| `PALETTE attr, color` | パレット色の変更 | `PALETTE 0, 0` |
+| `BEEP` | ビープ音 | `BEEP` |
+| `SOUND freq, duration` | 周波数・長さ指定の音生成 | `SOUND 440, 18` |
+| `PLAY "string"` | MML文字列による音楽演奏 | `PLAY "CDEFGAB"` |
+| `SLEEP n` | n秒間停止 | `SLEEP 1` |
 
 ## 演算子
 | 種別 | 演算子 |
@@ -79,6 +110,11 @@
 | `CSNG(x)` | 単精度浮動小数点に変換 |
 | `CDBL(x)` | 倍精度浮動小数点に変換 |
 
+### グラフィクス
+| 関数 | 説明 |
+|---|---|
+| `POINT(x, y)` | 座標 (x,y) の色番号を返す（衝突判定等に利用） |
+
 ### 出力・I/O
 | 関数 | 説明 |
 |---|---|
@@ -99,7 +135,7 @@
 
 # 使い方
 
-## ファイルを実行
+## CLIでファイルを実行
 ```
 python3 basic.py examples/hello.bas
 ```
@@ -115,6 +151,12 @@ REPLの特殊コマンド:
 - `NEW` — プログラムと変数をクリア
 - `QUIT` — 終了
 
+## ブラウザで実行（Pyodide）
+```
+python3 -m http.server 8080
+# → http://localhost:8080/web/index.html をブラウザで開く
+```
+
 
 # 開発メモ
 
@@ -122,5 +164,5 @@ REPLの特殊コマンド:
 ```
 python3 -m venv .venv
 .venv/bin/pip install pytest
-.venv/bin/python -m pytest tests/test_interpreter.py -v
+.venv/bin/python -m pytest tests/ -v
 ```
