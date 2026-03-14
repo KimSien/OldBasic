@@ -202,7 +202,8 @@ class CanvasRenderer(Renderer):
     # ------------------------------------------------------------------
 
     def sleep(self, seconds: float) -> None:
-        # Blocking sleep in Pyodide blocks the JS event loop.
-        # In browser use TIMER()-based busy-wait instead.
+        # Async sleep is handled by the interpreter's _run_loop_async via
+        # asyncio.sleep; this method is only called from the sync run() path
+        # (CLI/tests) and falls back to a blocking sleep there.
         import time
         time.sleep(seconds)

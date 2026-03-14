@@ -15,6 +15,7 @@ Execution model
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import math
 import random
@@ -82,6 +83,12 @@ class _PcJumpSignal(Exception):
         self.pc = pc
 
 
+class _SleepSignal(Exception):
+    """Raised by SLEEP so async loop can await instead of blocking."""
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+
+
 @dataclass
 class _ForFrame:
     var:     str
@@ -135,6 +142,42 @@ class Interpreter:
             return
         self._pc = 0
         self._run_loop()
+
+    async def run_async(self):
+        """Execute asynchronously, yielding to the JS event loop each line.
+
+        Use this from Pyodide/browser to allow canvas repaints between frames.
+        """
+        if not self._lines:
+            return
+        self._pc = 0
+        await self._run_loop_async()
+
+    async def _run_loop_async(self):
+        while 0 <= self._pc < len(self._lines):
+            line = self._lines[self._pc]
+            try:
+                self._exec_line(line)
+                self._pc += 1
+            except _GotoSignal as g:
+                self._pc = self._resolve_lineno(g.lineno, line.lineno)
+            except _GosubSignal as gs:
+                self._gosub_stack.append(self._pc + 1)
+                self._pc = self._resolve_lineno(gs.lineno, line.lineno)
+            except _ReturnSignal:
+                if not self._gosub_stack:
+                    raise BasicError('RETURN without GOSUB', line.lineno)
+                self._pc = self._gosub_stack.pop()
+            except _PcJumpSignal as j:
+                self._pc = j.pc
+            except _SleepSignal as s:
+                self._pc += 1
+                await asyncio.sleep(s.seconds)
+            except _EndSignal:
+                return
+            except BasicError:
+                raise
+            await asyncio.sleep(0)  # yield to JS event loop → browser can repaint
 
     def run_line(self, raw: str):
         """Execute a single line (REPL mode). Line number 0 = immediate."""
@@ -230,6 +273,9 @@ class Interpreter:
                 self._pc = self._gosub_stack.pop()
             except _PcJumpSignal as j:
                 self._pc = j.pc
+            except _SleepSignal as s:
+                self._renderer.sleep(s.seconds)
+                self._pc += 1
             except _EndSignal:
                 return
             except BasicError:
@@ -242,7 +288,7 @@ class Interpreter:
     def _exec_stmt(self, stmt: Any, lineno: int = 0):
         try:
             self._dispatch(stmt, lineno)
-        except (_EndSignal, _GotoSignal, _GosubSignal, _ReturnSignal, _PcJumpSignal):
+        except (_EndSignal, _GotoSignal, _GosubSignal, _ReturnSignal, _PcJumpSignal, _SleepSignal):
             raise
         except BasicError:
             raise
@@ -442,8 +488,7 @@ class Interpreter:
 
         if isinstance(stmt, SleepStmt):
             secs = float(self._num(self._eval(stmt.duration, lineno), lineno))
-            self._renderer.sleep(secs)
-            return
+            raise _SleepSignal(secs)
 
         if isinstance(stmt, DoStmt):
             self._exec_do(stmt, lineno)

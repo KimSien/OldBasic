@@ -57,7 +57,7 @@
     <div id="canvas-wrap">
       <canvas id="canvas" width="320" height="200"></canvas>
     </div>
-    <div id="console" id="output"></div>
+    <div id="console"></div>
   </div>
 </main>
 
@@ -106,11 +106,21 @@ async function init() {
 
     // Bootstrap interpreter in Python
     await pyodide.runPythonAsync(`
-import sys
+import sys, asyncio
 sys.path.insert(0, '/home/pyodide')
 sys.path.insert(0, '/home/pyodide/web')
 from basic.interpreter import Interpreter, BasicError
 from canvas_renderer import CanvasRenderer
+
+# Live stdout — writes directly to the console div without buffering
+import js as _js
+class _LiveOut:
+    def write(self, text):
+        el = _js.document.getElementById('console')
+        if el and text:
+            el.textContent += text
+    def flush(self): pass
+sys.stdout = _LiveOut()
 print("BASIC interpreter ready")
 `);
 
@@ -132,32 +142,19 @@ btnRun.addEventListener('click', async () => {
   statusEl.textContent = '実行中...';
   btnRun.disabled = true;
   try {
-    // Redirect stdout to the console div
     pyodide.globals.set('_basic_source', code);
     await pyodide.runPythonAsync(`
-import sys
-from io import StringIO
-
-_out_buf = StringIO()
-_old_stdout = sys.stdout
-sys.stdout = _out_buf
-
 try:
-    renderer = CanvasRenderer('canvas', 'console-output')
+    renderer = CanvasRenderer('canvas')
     interp = Interpreter(renderer=renderer)
     interp.load(_basic_source)
-    interp.run()
+    await interp.run_async()
 except BasicError as e:
     print(f"BASIC エラー: {e}")
 except Exception as e:
-    print(f"エラー: {e}")
-finally:
-    sys.stdout = _old_stdout
-
-_output = _out_buf.getvalue()
+    import traceback
+    print(traceback.format_exc())
 `);
-    const output = pyodide.globals.get('_output');
-    if (output) log(output);
     statusEl.textContent = '完了';
   } catch (e) {
     log('実行エラー: ' + e.message, '#e94560');
