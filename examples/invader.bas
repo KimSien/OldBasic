@@ -32,7 +32,7 @@
 320 REM ======= メインループ =======
 330 REM
 340 DO WHILE RUNNING=1
-350   LET K$=INKEY$
+350   LET K$=INKEY$()
 360   REM -- プレイヤー消す --
 370   LINE (PX-8,PY-9)-(PX+8,PY+1),1,BF
 380   REM -- 移動 --

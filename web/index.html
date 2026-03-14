@@ -13,12 +13,13 @@
     #btn-run:hover  { background: #e94560; }
     #btn-clear { background: #333; color: #ccc; }
     #status { font-size: 0.8rem; color: #aaa; margin-left: auto; }
+    #key-debug { font-size: 0.8rem; color: #7dd3fc; min-width: 140px; text-align: right; }
     select { background: #0d0d1a; color: #a8ff78; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px; font-family: monospace; font-size: 0.85rem; cursor: pointer; }
     main { display: flex; flex: 1; overflow: hidden; }
     #editor-panel { display: flex; flex-direction: column; width: 380px; min-width: 200px; border-right: 1px solid #0f3460; }
     #code { flex: 1; background: #0d0d1a; color: #a8ff78; border: none; padding: 12px; font-family: monospace; font-size: 0.85rem; resize: none; outline: none; }
     #right-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-    #canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; }
+    #canvas-wrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; outline: none; }
     canvas { image-rendering: pixelated; border: 1px solid #333; }
     #console { height: 120px; background: #0d0d1a; border-top: 1px solid #0f3460; overflow-y: auto; padding: 8px 12px; font-size: 0.8rem; color: #ccc; white-space: pre-wrap; }
   </style>
@@ -33,10 +34,12 @@
     <option value="gradient">gradient.bas — グラデーション＋サイン波</option>
     <option value="bounce">bounce.bas — バウンドボール</option>
     <option value="sprite">sprite.bas — スプライト移動</option>
+    <option value="keytest">keytest.bas — キー入力テスト</option>
     <option value="invader">invader.bas — スペースインベーダー</option>
   </select>
   <button id="btn-run">&#9654; RUN</button>
   <button id="btn-clear">CLR</button>
+  <span id="key-debug">key: idle</span>
   <span id="status">Pyodide を読み込み中...</span>
 </header>
 <main>
@@ -55,7 +58,7 @@
 </textarea>
   </div>
   <div id="right-panel">
-    <div id="canvas-wrap">
+    <div id="canvas-wrap" tabindex="0">
       <canvas id="canvas" width="320" height="200"></canvas>
     </div>
     <div id="console"></div>
@@ -64,24 +67,40 @@
 
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
 <script>
-// Key buffer for INKEY$
-// _pySetKey is a Python callback registered after Pyodide loads.
-// Calling it directly avoids JsProxy attribute-access issues.
-window._pySetKey = null;
+// Key buffer for INKEY$.
+// Keep this in JS so Python only reads state and never needs re-entrant callbacks.
+window.basicKeyBuf = '';
+window.basicKeyQueue = [];
 const _KEY_MAP = {
   'ArrowLeft': 'z', 'ArrowRight': 'x',
   ' ': ' ', 'z': 'z', 'x': 'x', 'Z': 'z', 'X': 'x'
 };
-document.addEventListener('keydown', e => {
+const keyDebugEl = document.getElementById('key-debug');
+function updateKeyDebug(label) {
+  keyDebugEl.textContent = `key: ${label}`;
+}
+window.addEventListener('keydown', e => {
   const k = _KEY_MAP[e.key] !== undefined ? _KEY_MAP[e.key]
             : (e.key.length === 1 ? e.key : null);
   if (k !== null) {
-    if (window._pySetKey) window._pySetKey(k);
+    window.basicKeyBuf = k;
+    window.basicKeyQueue.push(k);
+    updateKeyDebug(k === ' ' ? 'SPACE' : k);
     e.preventDefault();
   }
 });
-document.addEventListener('keyup', () => {
-  if (window._pySetKey) window._pySetKey('');
+window.addEventListener('keyup', e => {
+  const k = _KEY_MAP[e.key] !== undefined ? _KEY_MAP[e.key]
+            : (e.key.length === 1 ? e.key : null);
+  if (k === null || window.basicKeyBuf === k) {
+    window.basicKeyBuf = '';
+    updateKeyDebug('idle');
+  }
+});
+window.addEventListener('blur', () => {
+  window.basicKeyBuf = '';
+  window.basicKeyQueue = [];
+  updateKeyDebug('idle');
 });
 
 let pyodide = null;
@@ -89,6 +108,7 @@ const statusEl  = document.getElementById('status');
 const consoleEl = document.getElementById('console');
 const btnRun    = document.getElementById('btn-run');
 const btnClear  = document.getElementById('btn-clear');
+const canvasWrap = document.getElementById('canvas-wrap');
 
 function log(msg, color = '#ccc') {
   const span = document.createElement('span');
@@ -118,7 +138,7 @@ async function init() {
     ];
 
     for (const [src, dst] of coreFiles) {
-      const resp = await fetch('../' + src);
+      const resp = await fetch('../' + src, { cache: 'no-store' });
       if (!resp.ok) throw new Error(`Failed to fetch ${src}: ${resp.status}`);
       const text = await resp.text();
       pyodide.FS.writeFile(dst, text, { encoding: 'utf8' });
@@ -131,16 +151,12 @@ import sys, asyncio
 sys.path.insert(0, '/home/pyodide')
 sys.path.insert(0, '/home/pyodide/web')
 from basic.interpreter import Interpreter, BasicError
-from canvas_renderer import CanvasRenderer, _set_key as _canvas_set_key
-
-# Register Python key-setter as a JS callback on window._pySetKey.
-# JS keydown/keyup handlers call it directly — no JsProxy attribute lookup needed.
-import js as _js
-_js.window._pySetKey = _canvas_set_key
+from canvas_renderer import CanvasRenderer
 
 # Live stdout — writes directly to the console div without buffering
 class _LiveOut:
     def write(self, text):
+        import js as _js
         el = _js.document.getElementById('console')
         if el and text:
             el.textContent += text
@@ -163,6 +179,10 @@ btnRun.disabled = true;
 btnRun.addEventListener('click', async () => {
   if (!pyodide) return;
   consoleEl.textContent = '';
+  window.basicKeyBuf = '';
+  window.basicKeyQueue = [];
+  updateKeyDebug('ready');
+  canvasWrap.focus();
   const code = document.getElementById('code').value;
   statusEl.textContent = '実行中...';
   btnRun.disabled = true;
@@ -196,7 +216,7 @@ document.getElementById('sample-select').addEventListener('change', async (e) =>
   const name = e.target.value;
   if (!name) return;
   try {
-    const resp = await fetch('../examples/' + name + '.bas');
+    const resp = await fetch('../examples/' + name + '.bas', { cache: 'no-store' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     document.getElementById('code').value = await resp.text();
     e.target.value = '';

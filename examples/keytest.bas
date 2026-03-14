@@ -1,0 +1,38 @@
+10 REM keytest.bas - INKEY$ の動作確認
+20 REM 操作: Z or ← = 左 / X or → = 右 / SPACE = 発射 / Q = 終了
+30 SCREEN 1
+40 CLS
+50 COLOR 15, 0
+60 PRINT "KEY TEST"
+70 PRINT "Press Z / X / SPACE"
+80 PRINT "Press Q to quit"
+90 PRINT ""
+100 PRINT "Watch the 3 boxes and console output."
+110 LINE (14,24)-(104,74),8,B
+120 LINE (114,24)-(204,74),8,B
+130 LINE (214,24)-(304,74),8,B
+140 PRINT "Waiting for key input..."
+150 LET LAST$ = "#"
+160 DO
+170   LET K$ = INKEY$()
+180   IF K$ = LAST$ THEN GOTO 400
+190   LET LAST$ = K$
+200   LINE (16,26)-(102,72),1,BF
+210   LINE (116,26)-(202,72),1,BF
+220   LINE (216,26)-(302,72),1,BF
+230   IF K$ = "" THEN GOTO 300
+240   IF K$ = "z" THEN LINE (16,26)-(102,72),10,BF
+250   IF K$ = "x" THEN LINE (116,26)-(202,72),11,BF
+260   IF K$ = " " THEN LINE (216,26)-(302,72),12,BF
+270   IF K$ = " " THEN GOTO 340
+280   PRINT "KEY:"; K$
+290   GOTO 360
+300   PRINT "KEY: <none>"
+310   GOTO 400
+340   PRINT "KEY: SPACE"
+350   GOTO 400
+360   IF K$ <> "q" THEN GOTO 400
+370   PRINT "QUIT"
+380   END
+400   SLEEP 0.03
+410 LOOP

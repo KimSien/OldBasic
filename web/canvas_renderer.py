@@ -8,15 +8,6 @@ import math
 import sys
 sys.path.insert(0, '/home/pyodide')
 
-# Module-level key buffer.  JS keydown/keyup handlers call _set_key() directly
-# as a Python callback registered on window._pySetKey.  This avoids all
-# Pyodide JsProxy round-trip issues when reading window.basicKeyBuf from Python.
-_KEY_BUF: list[str] = ['']
-
-def _set_key(k: str) -> None:
-    """Called synchronously by the JS keydown/keyup handler."""
-    _KEY_BUF[0] = str(k) if k else ''
-
 from basic.renderer import Renderer
 
 try:
@@ -432,7 +423,14 @@ class CanvasRenderer(Renderer):
     # ------------------------------------------------------------------
 
     def inkey(self) -> str:
-        return _KEY_BUF[0]
+        try:
+            queue = js.window.basicKeyQueue
+            if queue.length:
+                return str(queue.shift())
+            held = js.window.basicKeyBuf
+            return str(held or '')
+        except Exception:
+            return ''
 
     def sleep(self, seconds: float) -> None:
         # Async sleep is handled by the interpreter's _run_loop_async via
