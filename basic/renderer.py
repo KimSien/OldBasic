@@ -28,6 +28,7 @@ class Renderer:
     def sound(self, freq: float, duration: float) -> None: pass
     def play(self, music: str) -> None: pass
     def sleep(self, seconds: float) -> None: time.sleep(seconds)
+    def inkey(self) -> str: return ''
 
 
 class NullRenderer(Renderer):
@@ -88,6 +89,10 @@ class NullRenderer(Renderer):
 
     def sleep(self, seconds: float) -> None:
         self.calls.append(('sleep', seconds))
+
+    def inkey(self) -> str:
+        self.calls.append(('inkey',))
+        return ''
 
     def last(self, name: str):
         for call in reversed(self.calls):

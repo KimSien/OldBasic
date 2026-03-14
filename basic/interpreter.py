@@ -1103,6 +1103,8 @@ class Interpreter:
         if name == 'INKEY$':
             if len(evaled) != 0:
                 raise BasicError('INKEY$ takes no arguments', lineno)
+            if hasattr(self._renderer, 'inkey'):
+                return self._renderer.inkey()
             try:
                 import select
                 if select.select([sys.stdin], [], [], 0)[0]:

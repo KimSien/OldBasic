@@ -194,6 +194,29 @@ def run_frames(self):
 - [x] A-2 `interp.run_async()` 追加
 - [x] A-3 `index.html` を `await interp.run_async()` に切り替え
 - [x] B-1/B-2 `_SleepSignal` 導入 → async ループで `await asyncio.sleep(secs)` に変換
-- [ ] C-1 `flip()` メソッド追加（現状は毎行 yield で代替）
-- [ ] C-2 FLIP 文設計（将来タスク）
+- [x] C-1 毎行 `await asyncio.sleep(0)` yield で代替済み（明示的 flip 不要）
+- [x] C-2 FLIP 文は不要と判断（SLEEP による自然なフレームバウンダリで十分）
 - [x] D-1 `_LiveOut` カスタム stdout → コンソールへリアルタイム出力
+
+---
+
+## 追加課題: `invader.bas` のキー入力が反映されない
+
+### 原因
+
+`examples/invader.bas` は `LET K$ = INKEY$` の形式を使っているが、実装側は
+`INKEY$()` のような括弧付き関数呼び出ししか関数として解釈していなかった。
+そのため `INKEY$` は組み込み関数ではなく未初期化の文字列変数として評価され、
+常に空文字になっていた。
+
+### 課題
+
+| # | 作業 | 詳細 |
+|---|------|------|
+| E-1 | 0引数組み込み関数の裸呼び出し対応 | `INKEY$`, `TIMER`, `DATE$`, `TIME$`, `CSRLIN` を `NAME` だけでも関数として解釈 |
+| E-2 | 回帰テスト追加 | `LET K$ = INKEY$` がレンダラ入力を返すことをテストで固定 |
+
+### ステータス
+
+- [x] E-1 パーサで裸の 0 引数組み込み関数を `FuncCallNode` として扱うよう修正
+- [x] E-2 `tests/test_interpreter.py` に `INKEY$` 裸呼び出しの回帰テストを追加

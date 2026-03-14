@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from basic.interpreter import BasicError, Interpreter
+from basic.renderer import Renderer
 
 
 # ---------------------------------------------------------------------------
@@ -648,6 +649,22 @@ class TestInkeyDollar:
         with patch("sys.stdin", io.StringIO("")):
             result = run('10 LET K$ = INKEY$()\n20 PRINT LEN(K$)')
         assert result == "0\n"
+
+    def test_accepts_bare_builtin_form(self):
+        class _KeyRenderer(Renderer):
+            def inkey(self) -> str:
+                return "z"
+
+        out = StringIO()
+        interp = Interpreter(renderer=_KeyRenderer())
+        interp.load('10 LET K$ = INKEY$\n20 PRINT K$')
+        with patch("sys.stdout", out):
+            interp.run()
+        assert out.getvalue() == "z\n"
+
+    def test_does_not_break_other_builtin_like_variable_names(self):
+        assert run('10 LET TIMER=123\n20 PRINT TIMER') == "123\n"
+        assert run('10 LET DATE$="X"\n20 PRINT DATE$') == "X\n"
 
 
 class TestInputDollar:

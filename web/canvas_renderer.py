@@ -8,13 +8,24 @@ import math
 import sys
 sys.path.insert(0, '/home/pyodide')
 
+# Module-level key buffer.  JS keydown/keyup handlers call _set_key() directly
+# as a Python callback registered on window._pySetKey.  This avoids all
+# Pyodide JsProxy round-trip issues when reading window.basicKeyBuf from Python.
+_KEY_BUF: list[str] = ['']
+
+def _set_key(k: str) -> None:
+    """Called synchronously by the JS keydown/keyup handler."""
+    _KEY_BUF[0] = str(k) if k else ''
+
 from basic.renderer import Renderer
 
 try:
     import js
+    from pyodide.ffi import to_js
     _HAS_JS = True
 except ImportError:
     _HAS_JS = False
+    def to_js(x): return x
 
 
 # 16-color EGA/CGA palette (BASIC color indices 0-15)
@@ -110,10 +121,55 @@ class CanvasRenderer(Renderer):
         self._ctx.stroke()
 
     def paint(self, x: int, y: int, color: int, border=None) -> None:
-        # Simplified flood-fill: set a single pixel (full flood-fill needs
-        # ImageData manipulation which is complex in Pyodide)
-        self._ctx.fillStyle = self._css(color)
-        self._ctx.fillRect(x, y, 1, 1)
+        """Flood-fill from (x, y) with color, stopping at border color."""
+        w, h = self._w, self._h
+        if x < 0 or x >= w or y < 0 or y >= h:
+            return
+
+        # Parse fill color
+        fc = self._css(color)
+        fr, fg_v, fb = int(fc[1:3], 16), int(fc[3:5], 16), int(fc[5:7], 16)
+
+        # Read full canvas into a Python bytearray
+        img = self._ctx.getImageData(0, 0, w, h)
+        buf = bytearray(img.data.to_py())
+
+        # Seed pixel color
+        i0 = (y * w + x) * 4
+        sr, sg, sb = buf[i0], buf[i0 + 1], buf[i0 + 2]
+
+        if (sr, sg, sb) == (fr, fg_v, fb):
+            return  # already the target color
+
+        if border is not None:
+            bc = self._css(border)
+            brr, brg, brb = int(bc[1:3], 16), int(bc[3:5], 16), int(bc[5:7], 16)
+            def _passable(r, g, b):
+                return (r, g, b) != (brr, brg, brb)
+        else:
+            def _passable(r, g, b):
+                return (r, g, b) == (sr, sg, sb)
+
+        # BFS scanline-based flood fill
+        visited = bytearray(w * h)
+        stack = [x + y * w]
+        while stack:
+            p = stack.pop()
+            if visited[p]:
+                continue
+            py_y, px = divmod(p, w)
+            i4 = p * 4
+            if not _passable(buf[i4], buf[i4 + 1], buf[i4 + 2]):
+                continue
+            visited[p] = 1
+            buf[i4], buf[i4 + 1], buf[i4 + 2], buf[i4 + 3] = fr, fg_v, fb, 255
+            if px > 0:     stack.append(p - 1)
+            if px < w - 1: stack.append(p + 1)
+            if py_y > 0:   stack.append(p - w)
+            if py_y < h-1: stack.append(p + w)
+
+        img.data.set(to_js(bytes(buf)))
+        self._ctx.putImageData(img, 0, 0)
 
     def point(self, x: int, y: int) -> int:
         data = self._ctx.getImageData(x, y, 1, 1).data
@@ -137,18 +193,79 @@ class CanvasRenderer(Renderer):
         return pixels
 
     def put_region(self, x: int, y: int, data: list, mode: str = 'PSET') -> None:
-        # Simplified: draw each pixel using PSET (XOR/AND modes not yet supported)
+        """Blit sprite data to canvas. Supports PSET, PRESET, XOR, AND, OR."""
         if not data:
             return
-        w = int(len(data) ** 0.5) or 1
-        for i, px in enumerate(data):
-            dx = i % w
-            dy = i // w
-            r_val = (px >> 16) & 0xFF
-            g_val = (px >>  8) & 0xFF
-            b_val =  px        & 0xFF
-            self._ctx.fillStyle = f'rgb({r_val},{g_val},{b_val})'
-            self._ctx.fillRect(x + dx, y + dy, 1, 1)
+        n = len(data)
+        sw = int(n ** 0.5) or 1   # sprite width (assumes square; works for GET regions)
+        sh = (n + sw - 1) // sw   # sprite height
+
+        # Clamp to canvas bounds
+        dx_off = max(0, -x)
+        dy_off = max(0, -y)
+        draw_w = min(sw - dx_off, self._w - max(0, x))
+        draw_h = min(sh - dy_off, self._h - max(0, y))
+        if draw_w <= 0 or draw_h <= 0:
+            return
+
+        cx = max(0, x)
+        cy = max(0, y)
+
+        if mode == 'PSET':
+            # Build an ImageData directly from sprite pixels (fast path)
+            raw = bytearray(draw_w * draw_h * 4)
+            for row in range(draw_h):
+                for col in range(draw_w):
+                    px = data[(row + dy_off) * sw + (col + dx_off)]
+                    i4 = (row * draw_w + col) * 4
+                    raw[i4]     = (px >> 16) & 0xFF
+                    raw[i4 + 1] = (px >>  8) & 0xFF
+                    raw[i4 + 2] =  px        & 0xFF
+                    raw[i4 + 3] = 255
+            new_img = js.ImageData.new(
+                js.Uint8ClampedArray.new(to_js(bytes(raw))), draw_w, draw_h)
+            self._ctx.putImageData(new_img, cx, cy)
+
+        elif mode == 'PRESET':
+            # Invert each sprite pixel
+            raw = bytearray(draw_w * draw_h * 4)
+            for row in range(draw_h):
+                for col in range(draw_w):
+                    px = data[(row + dy_off) * sw + (col + dx_off)]
+                    i4 = (row * draw_w + col) * 4
+                    raw[i4]     = 0xFF ^ ((px >> 16) & 0xFF)
+                    raw[i4 + 1] = 0xFF ^ ((px >>  8) & 0xFF)
+                    raw[i4 + 2] = 0xFF ^ ( px        & 0xFF)
+                    raw[i4 + 3] = 255
+            new_img = js.ImageData.new(
+                js.Uint8ClampedArray.new(to_js(bytes(raw))), draw_w, draw_h)
+            self._ctx.putImageData(new_img, cx, cy)
+
+        else:  # XOR, AND, OR — read-modify-write existing canvas pixels
+            img = self._ctx.getImageData(cx, cy, draw_w, draw_h)
+            buf = bytearray(img.data.to_py())
+            for row in range(draw_h):
+                for col in range(draw_w):
+                    px = data[(row + dy_off) * sw + (col + dx_off)]
+                    sr = (px >> 16) & 0xFF
+                    sg = (px >>  8) & 0xFF
+                    sb =  px        & 0xFF
+                    i4 = (row * draw_w + col) * 4
+                    if mode == 'XOR':
+                        buf[i4]     ^= sr
+                        buf[i4 + 1] ^= sg
+                        buf[i4 + 2] ^= sb
+                    elif mode == 'AND':
+                        buf[i4]     &= sr
+                        buf[i4 + 1] &= sg
+                        buf[i4 + 2] &= sb
+                    elif mode == 'OR':
+                        buf[i4]     |= sr
+                        buf[i4 + 1] |= sg
+                        buf[i4 + 2] |= sb
+                    buf[i4 + 3] = 255
+            img.data.set(to_js(bytes(buf)))
+            self._ctx.putImageData(img, cx, cy)
 
     # ------------------------------------------------------------------
     # Color / Palette
@@ -191,15 +308,131 @@ class CanvasRenderer(Renderer):
             pass  # Audio not available
 
     def play(self, music: str) -> None:
-        # Minimal MML: notes A-G, O<n> octave, T<n> tempo, L<n> length
-        # Full MML parsing is omitted; play just beeps once per note letter
-        for ch in music.upper():
-            if ch in 'ABCDEFG':
-                self.beep()
+        """Play MML string via Web Audio API.
+
+        Supported commands:
+          A-G [#/+/-] [n]  — note (optional sharp/flat, optional length override)
+          O<n>             — set octave (1-8, default 4)
+          L<n>             — set default note length (1/2/4/8/16/32, default 4)
+          T<n>             — set tempo BPM (default 120)
+          P<n> / R<n>      — rest
+          < / >            — octave down / up
+          .                — dotted note (×1.5 duration)
+          N<n>             — play MIDI note number directly
+        """
+        _SEMITONES = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
+
+        def _read_int(s, pos):
+            j = pos
+            while j < len(s) and s[j].isdigit():
+                j += 1
+            return (int(s[pos:j]), j) if j > pos else (None, pos)
+
+        def _midi_freq(midi):
+            return 440.0 * (2.0 ** ((midi - 69) / 12.0))
+
+        try:
+            audio_ctx = js.eval(
+                'new (window.AudioContext || window.webkitAudioContext)()')
+            t = float(audio_ctx.currentTime) + 0.05
+        except Exception:
+            return
+
+        octave = 4
+        length = 4
+        tempo  = 120
+        s = music.upper()
+        i = 0
+
+        while i < len(s):
+            c = s[i]
+            i += 1
+
+            if c == 'O':
+                n, i = _read_int(s, i)
+                if n is not None:
+                    octave = max(1, min(8, n))
+
+            elif c == 'L':
+                n, i = _read_int(s, i)
+                if n is not None and n > 0:
+                    length = n
+
+            elif c == 'T':
+                n, i = _read_int(s, i)
+                if n is not None:
+                    tempo = max(1, min(255, n))
+
+            elif c == '<':
+                octave = max(1, octave - 1)
+
+            elif c == '>':
+                octave = min(8, octave + 1)
+
+            elif c in _SEMITONES:
+                semi = _SEMITONES[c]
+                # sharp / flat
+                if i < len(s) and s[i] in '#+':
+                    semi += 1; i += 1
+                elif i < len(s) and s[i] == '-':
+                    semi -= 1; i += 1
+                # explicit length
+                n, new_i = _read_int(s, i)
+                note_len = n if (n is not None and n > 0) else length
+                if n is not None:
+                    i = new_i
+                # dotted
+                dotted = i < len(s) and s[i] == '.'
+                if dotted:
+                    i += 1
+                midi = 12 * (octave + 1) + semi
+                freq = _midi_freq(midi)
+                dur  = (60.0 / tempo) * (4.0 / note_len) * (1.5 if dotted else 1.0)
+                try:
+                    osc  = audio_ctx.createOscillator()
+                    gain = audio_ctx.createGain()
+                    osc.type = 'square'
+                    osc.frequency.value = freq
+                    gain.gain.value = 0.25
+                    osc.connect(gain)
+                    gain.connect(audio_ctx.destination)
+                    osc.start(t)
+                    osc.stop(t + dur * 0.9)
+                    t += dur
+                except Exception:
+                    pass
+
+            elif c in ('P', 'R'):
+                n, new_i = _read_int(s, i)
+                rest_len = n if (n is not None and n > 0) else length
+                if n is not None:
+                    i = new_i
+                t += (60.0 / tempo) * (4.0 / rest_len)
+
+            elif c == 'N':
+                n, i = _read_int(s, i)
+                if n is not None:
+                    dur = (60.0 / tempo) * (4.0 / length)
+                    try:
+                        osc  = audio_ctx.createOscillator()
+                        gain = audio_ctx.createGain()
+                        osc.type = 'square'
+                        osc.frequency.value = _midi_freq(n)
+                        gain.gain.value = 0.25
+                        osc.connect(gain)
+                        gain.connect(audio_ctx.destination)
+                        osc.start(t)
+                        osc.stop(t + dur * 0.9)
+                        t += dur
+                    except Exception:
+                        pass
 
     # ------------------------------------------------------------------
     # Timing
     # ------------------------------------------------------------------
+
+    def inkey(self) -> str:
+        return _KEY_BUF[0]
 
     def sleep(self, seconds: float) -> None:
         # Async sleep is handled by the interpreter's _run_loop_async via

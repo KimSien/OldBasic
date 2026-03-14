@@ -934,6 +934,8 @@ class Parser:
                             f'Line {self._lineno}: array {name} requires 1 index'
                         )
                     return ArrayAccessNode(name, args[0])
+            if name in _BARE_BUILTIN_FUNCS:
+                return FuncCallNode(name, [])
             return VarNode(name)
 
         if tok.type == TT.LPAREN:
@@ -966,6 +968,12 @@ _BUILTIN_FUNCS = {
     'TIMER', 'DATE$', 'TIME$',
     # Graphics
     'POINT',
+}
+
+# BASIC dialect compatibility: some zero-arg built-ins are commonly used
+# without trailing parentheses, e.g. `INKEY$` in game loops.
+_BARE_BUILTIN_FUNCS = {
+    'INKEY$',
 }
 
 import re

@@ -33,6 +33,7 @@
     <option value="gradient">gradient.bas — グラデーション＋サイン波</option>
     <option value="bounce">bounce.bas — バウンドボール</option>
     <option value="sprite">sprite.bas — スプライト移動</option>
+    <option value="invader">invader.bas — スペースインベーダー</option>
   </select>
   <button id="btn-run">&#9654; RUN</button>
   <button id="btn-clear">CLR</button>
@@ -63,6 +64,26 @@
 
 <script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
 <script>
+// Key buffer for INKEY$
+// _pySetKey is a Python callback registered after Pyodide loads.
+// Calling it directly avoids JsProxy attribute-access issues.
+window._pySetKey = null;
+const _KEY_MAP = {
+  'ArrowLeft': 'z', 'ArrowRight': 'x',
+  ' ': ' ', 'z': 'z', 'x': 'x', 'Z': 'z', 'X': 'x'
+};
+document.addEventListener('keydown', e => {
+  const k = _KEY_MAP[e.key] !== undefined ? _KEY_MAP[e.key]
+            : (e.key.length === 1 ? e.key : null);
+  if (k !== null) {
+    if (window._pySetKey) window._pySetKey(k);
+    e.preventDefault();
+  }
+});
+document.addEventListener('keyup', () => {
+  if (window._pySetKey) window._pySetKey('');
+});
+
 let pyodide = null;
 const statusEl  = document.getElementById('status');
 const consoleEl = document.getElementById('console');
@@ -110,10 +131,14 @@ import sys, asyncio
 sys.path.insert(0, '/home/pyodide')
 sys.path.insert(0, '/home/pyodide/web')
 from basic.interpreter import Interpreter, BasicError
-from canvas_renderer import CanvasRenderer
+from canvas_renderer import CanvasRenderer, _set_key as _canvas_set_key
+
+# Register Python key-setter as a JS callback on window._pySetKey.
+# JS keydown/keyup handlers call it directly — no JsProxy attribute lookup needed.
+import js as _js
+_js.window._pySetKey = _canvas_set_key
 
 # Live stdout — writes directly to the console div without buffering
-import js as _js
 class _LiveOut:
     def write(self, text):
         el = _js.document.getElementById('console')
