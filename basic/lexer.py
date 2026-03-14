@@ -43,6 +43,23 @@ class TT(Enum):
     RANDOMIZE = auto()
     ON        = auto()
     DEF       = auto()
+    SCREEN    = auto()
+    CLS       = auto()
+    PSET      = auto()
+    LINE      = auto()
+    CIRCLE    = auto()
+    PAINT     = auto()
+    GET       = auto()
+    PUT       = auto()
+    COLOR     = auto()
+    PALETTE   = auto()
+    BEEP      = auto()
+    SOUND     = auto()
+    PLAY      = auto()
+    SLEEP     = auto()
+    DO        = auto()
+    LOOP      = auto()
+    UNTIL     = auto()
 
     # Operators / punctuation
     PLUS      = auto()
@@ -95,6 +112,23 @@ _KEYWORDS = {
     'RANDOMIZE': TT.RANDOMIZE,
     'ON':        TT.ON,
     'DEF':       TT.DEF,
+    'SCREEN':    TT.SCREEN,
+    'CLS':       TT.CLS,
+    'PSET':      TT.PSET,
+    'LINE':      TT.LINE,
+    'CIRCLE':    TT.CIRCLE,
+    'PAINT':     TT.PAINT,
+    'GET':       TT.GET,
+    'PUT':       TT.PUT,
+    'COLOR':     TT.COLOR,
+    'PALETTE':   TT.PALETTE,
+    'BEEP':      TT.BEEP,
+    'SOUND':     TT.SOUND,
+    'PLAY':      TT.PLAY,
+    'SLEEP':     TT.SLEEP,
+    'DO':        TT.DO,
+    'LOOP':      TT.LOOP,
+    'UNTIL':     TT.UNTIL,
 }
 
 

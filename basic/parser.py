@@ -171,6 +171,98 @@ class DefFnStmt:
     body: Any           # expression node
 
 @dataclass
+class ScreenStmt:
+    mode: Any
+
+@dataclass
+class ClsStmt:
+    pass
+
+@dataclass
+class PsetStmt:
+    x: Any
+    y: Any
+    color: Any = None
+
+@dataclass
+class LineStmt:
+    x1: Any
+    y1: Any
+    x2: Any
+    y2: Any
+    color: Any = None
+    mode: str = ''
+
+@dataclass
+class CircleStmt:
+    x: Any
+    y: Any
+    r: Any
+    color: Any = None
+    start: Any = None
+    end: Any = None
+    aspect: Any = None
+
+@dataclass
+class PaintStmt:
+    x: Any
+    y: Any
+    color: Any = None
+    border: Any = None
+
+@dataclass
+class GetStmt:
+    x1: Any
+    y1: Any
+    x2: Any
+    y2: Any
+    array_name: str = ''
+
+@dataclass
+class PutStmt:
+    x: Any
+    y: Any
+    array_name: str = ''
+    mode: str = 'PSET'
+
+@dataclass
+class ColorStmt:
+    fg: Any = None
+    bg: Any = None
+
+@dataclass
+class PaletteStmt:
+    attr: Any
+    color_val: Any
+
+@dataclass
+class BeepStmt:
+    pass
+
+@dataclass
+class SoundStmt:
+    freq: Any
+    duration: Any
+
+@dataclass
+class PlayStmt:
+    music: Any
+
+@dataclass
+class SleepStmt:
+    duration: Any
+
+@dataclass
+class DoStmt:
+    condition_type: str = None   # 'WHILE', 'UNTIL', or None
+    condition: Any = None
+
+@dataclass
+class LoopStmt:
+    condition_type: str = None   # 'WHILE', 'UNTIL', or None
+    condition: Any = None
+
+@dataclass
 class Line:
     lineno: int
     stmts: list
@@ -334,6 +426,38 @@ class Parser:
             return self._parse_on()
         elif tt == TT.DEF:
             return self._parse_def_fn()
+        elif tt == TT.SCREEN:
+            return self._parse_screen()
+        elif tt == TT.CLS:
+            self._advance(); return ClsStmt()
+        elif tt == TT.PSET:
+            return self._parse_pset()
+        elif tt == TT.LINE:
+            return self._parse_line_stmt()
+        elif tt == TT.CIRCLE:
+            return self._parse_circle()
+        elif tt == TT.PAINT:
+            return self._parse_paint()
+        elif tt == TT.GET:
+            return self._parse_get()
+        elif tt == TT.PUT:
+            return self._parse_put()
+        elif tt == TT.COLOR:
+            return self._parse_color()
+        elif tt == TT.PALETTE:
+            return self._parse_palette()
+        elif tt == TT.BEEP:
+            self._advance(); return BeepStmt()
+        elif tt == TT.SOUND:
+            return self._parse_sound()
+        elif tt == TT.PLAY:
+            return self._parse_play()
+        elif tt == TT.SLEEP:
+            return self._parse_sleep()
+        elif tt == TT.DO:
+            return self._parse_do()
+        elif tt == TT.LOOP:
+            return self._parse_loop()
         elif tt == TT.IDENT:
             # Could be assignment  VAR = expr  or  VAR(idx) = expr
             return self._parse_assign()
@@ -542,6 +666,168 @@ class Parser:
         body = self._parse_expression()
         return DefFnStmt(fn_name, param, body)
 
+    def _parse_coord_pair(self):
+        """Parse (expr, expr) and return (x_node, y_node)."""
+        self._expect(TT.LPAREN)
+        x = self._parse_expression()
+        self._expect(TT.COMMA)
+        y = self._parse_expression()
+        self._expect(TT.RPAREN)
+        return x, y
+
+    def _parse_screen(self):
+        self._advance()  # consume SCREEN
+        mode = self._parse_expression()
+        return ScreenStmt(mode)
+
+    def _parse_pset(self):
+        self._advance()  # consume PSET
+        x, y = self._parse_coord_pair()
+        color = None
+        if self._match(TT.COMMA):
+            self._advance()
+            color = self._parse_expression()
+        return PsetStmt(x, y, color)
+
+    def _parse_line_stmt(self):
+        self._advance()  # consume LINE
+        x1, y1 = self._parse_coord_pair()
+        self._expect(TT.MINUS)
+        x2, y2 = self._parse_coord_pair()
+        color = None
+        mode = ''
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.COMMA, TT.EOF, TT.COLON):
+                color = self._parse_expression()
+            if self._match(TT.COMMA):
+                self._advance()
+                if self._match(TT.IDENT):
+                    mode = self._advance().value  # B, BF, N
+        return LineStmt(x1, y1, x2, y2, color, mode)
+
+    def _parse_circle(self):
+        self._advance()  # consume CIRCLE
+        x, y = self._parse_coord_pair()
+        self._expect(TT.COMMA)
+        r = self._parse_expression()
+        color = start = end = aspect = None
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.COMMA, TT.EOF, TT.COLON):
+                color = self._parse_expression()
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.COMMA, TT.EOF, TT.COLON):
+                start = self._parse_expression()
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.COMMA, TT.EOF, TT.COLON):
+                end = self._parse_expression()
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.EOF, TT.COLON):
+                aspect = self._parse_expression()
+        return CircleStmt(x, y, r, color, start, end, aspect)
+
+    def _parse_paint(self):
+        self._advance()  # consume PAINT
+        x, y = self._parse_coord_pair()
+        color = border = None
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.COMMA, TT.EOF, TT.COLON):
+                color = self._parse_expression()
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.EOF, TT.COLON):
+                border = self._parse_expression()
+        return PaintStmt(x, y, color, border)
+
+    def _parse_get(self):
+        self._advance()  # consume GET
+        x1, y1 = self._parse_coord_pair()
+        self._expect(TT.MINUS)
+        x2, y2 = self._parse_coord_pair()
+        self._expect(TT.COMMA)
+        name = self._expect(TT.IDENT).value
+        return GetStmt(x1, y1, x2, y2, name)
+
+    def _parse_put(self):
+        self._advance()  # consume PUT
+        x, y = self._parse_coord_pair()
+        self._expect(TT.COMMA)
+        name = self._expect(TT.IDENT).value
+        mode = 'PSET'
+        if self._match(TT.COMMA):
+            self._advance()
+            if self._match(TT.IDENT):
+                mode = self._advance().value
+        return PutStmt(x, y, name, mode)
+
+    def _parse_color(self):
+        self._advance()  # consume COLOR
+        fg = bg = None
+        if not self._match(TT.COMMA, TT.EOF, TT.COLON):
+            fg = self._parse_expression()
+        if self._match(TT.COMMA):
+            self._advance()
+            if not self._match(TT.EOF, TT.COLON):
+                bg = self._parse_expression()
+        return ColorStmt(fg, bg)
+
+    def _parse_palette(self):
+        self._advance()  # consume PALETTE
+        attr = self._parse_expression()
+        self._expect(TT.COMMA)
+        color_val = self._parse_expression()
+        return PaletteStmt(attr, color_val)
+
+    def _parse_sound(self):
+        self._advance()  # consume SOUND
+        freq = self._parse_expression()
+        self._expect(TT.COMMA)
+        duration = self._parse_expression()
+        return SoundStmt(freq, duration)
+
+    def _parse_play(self):
+        self._advance()  # consume PLAY
+        music = self._parse_expression()
+        return PlayStmt(music)
+
+    def _parse_sleep(self):
+        self._advance()  # consume SLEEP
+        duration = self._parse_expression()
+        return SleepStmt(duration)
+
+    def _parse_do(self):
+        self._advance()  # consume DO
+        condition_type = None
+        condition = None
+        if self._match(TT.WHILE):
+            self._advance()
+            condition_type = 'WHILE'
+            condition = self._parse_expression()
+        elif self._match(TT.UNTIL):
+            self._advance()
+            condition_type = 'UNTIL'
+            condition = self._parse_expression()
+        return DoStmt(condition_type, condition)
+
+    def _parse_loop(self):
+        self._advance()  # consume LOOP
+        condition_type = None
+        condition = None
+        if self._match(TT.WHILE):
+            self._advance()
+            condition_type = 'WHILE'
+            condition = self._parse_expression()
+        elif self._match(TT.UNTIL):
+            self._advance()
+            condition_type = 'UNTIL'
+            condition = self._parse_expression()
+        return LoopStmt(condition_type, condition)
+
     # ------------------------------------------------------------------
     # Expressions
     # ------------------------------------------------------------------
@@ -678,6 +964,8 @@ _BUILTIN_FUNCS = {
     'INKEY$', 'INPUT$', 'SPC', 'POS', 'CSRLIN',
     # New system functions
     'TIMER', 'DATE$', 'TIME$',
+    # Graphics
+    'POINT',
 }
 
 import re

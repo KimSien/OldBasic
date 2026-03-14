@@ -35,8 +35,12 @@ from .parser import (
     DimStmt, DataStmt, ReadStmt, RestoreStmt,
     WhileStmt, WendStmt, RandomizeStmt,
     OnGotoStmt, OnGosubStmt, DefFnStmt,
+    ScreenStmt, ClsStmt, PsetStmt, LineStmt, CircleStmt, PaintStmt,
+    GetStmt, PutStmt, ColorStmt, PaletteStmt, BeepStmt, SoundStmt,
+    PlayStmt, SleepStmt, DoStmt, LoopStmt,
 )
 from .lexer import TT
+from .renderer import Renderer
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +76,12 @@ class _ReturnSignal(Exception):
     pass
 
 
+class _PcJumpSignal(Exception):
+    """Used by DO/LOOP to jump to a specific PC index directly."""
+    def __init__(self, pc: int):
+        self.pc = pc
+
+
 @dataclass
 class _ForFrame:
     var:     str
@@ -86,13 +96,21 @@ class _WhileFrame:
     loop_pc:   int      # PC of the WHILE line
 
 
+@dataclass
+class _DoFrame:
+    do_pc:              int    # PC of the DO line
+    condition_type:     str    # 'WHILE', 'UNTIL', or None
+    condition:          object # AST node or None
+
+
 # ---------------------------------------------------------------------------
 # Interpreter
 # ---------------------------------------------------------------------------
 
 class Interpreter:
-    def __init__(self, interactive: bool = False):
+    def __init__(self, interactive: bool = False, renderer=None):
         self._interactive = interactive
+        self._renderer    = renderer if renderer is not None else Renderer()
         self._parser      = Parser()
         self._reset()
 
@@ -157,6 +175,7 @@ class Interpreter:
         self._gosub_stack: list[int]         = []  # stack of return PCs
         self._for_stack:   list[_ForFrame]   = []
         self._while_stack: list[_WhileFrame] = []
+        self._do_stack:    list[_DoFrame]    = []
         self._user_funcs:  dict[str, tuple]  = {}  # name -> (param, body_node)
         self._data:        list[Any]         = []
         self._data_ptr:    int               = 0
@@ -209,6 +228,8 @@ class Interpreter:
                 if not self._gosub_stack:
                     raise BasicError('RETURN without GOSUB', line.lineno)
                 self._pc = self._gosub_stack.pop()
+            except _PcJumpSignal as j:
+                self._pc = j.pc
             except _EndSignal:
                 return
             except BasicError:
@@ -221,7 +242,7 @@ class Interpreter:
     def _exec_stmt(self, stmt: Any, lineno: int = 0):
         try:
             self._dispatch(stmt, lineno)
-        except (_EndSignal, _GotoSignal, _GosubSignal, _ReturnSignal):
+        except (_EndSignal, _GotoSignal, _GosubSignal, _ReturnSignal, _PcJumpSignal):
             raise
         except BasicError:
             raise
@@ -330,6 +351,106 @@ class Interpreter:
 
         if isinstance(stmt, DefFnStmt):
             self._user_funcs[stmt.name] = (stmt.param, stmt.body)
+            return
+
+        if isinstance(stmt, ScreenStmt):
+            mode = int(self._num(self._eval(stmt.mode, lineno), lineno))
+            self._renderer.screen(mode)
+            return
+
+        if isinstance(stmt, ClsStmt):
+            self._renderer.cls()
+            return
+
+        if isinstance(stmt, PsetStmt):
+            x = int(self._num(self._eval(stmt.x, lineno), lineno))
+            y = int(self._num(self._eval(stmt.y, lineno), lineno))
+            color = int(self._num(self._eval(stmt.color, lineno), lineno)) if stmt.color is not None else 7
+            self._renderer.pset(x, y, color)
+            return
+
+        if isinstance(stmt, LineStmt):
+            x1 = int(self._num(self._eval(stmt.x1, lineno), lineno))
+            y1 = int(self._num(self._eval(stmt.y1, lineno), lineno))
+            x2 = int(self._num(self._eval(stmt.x2, lineno), lineno))
+            y2 = int(self._num(self._eval(stmt.y2, lineno), lineno))
+            color = int(self._num(self._eval(stmt.color, lineno), lineno)) if stmt.color is not None else 7
+            self._renderer.line(x1, y1, x2, y2, color, stmt.mode)
+            return
+
+        if isinstance(stmt, CircleStmt):
+            x = int(self._num(self._eval(stmt.x, lineno), lineno))
+            y = int(self._num(self._eval(stmt.y, lineno), lineno))
+            r = int(self._num(self._eval(stmt.r, lineno), lineno))
+            color = int(self._num(self._eval(stmt.color, lineno), lineno)) if stmt.color is not None else 7
+            start  = float(self._num(self._eval(stmt.start,  lineno), lineno)) if stmt.start  is not None else None
+            end    = float(self._num(self._eval(stmt.end,    lineno), lineno)) if stmt.end    is not None else None
+            aspect = float(self._num(self._eval(stmt.aspect, lineno), lineno)) if stmt.aspect is not None else None
+            self._renderer.circle(x, y, r, color, start, end, aspect)
+            return
+
+        if isinstance(stmt, PaintStmt):
+            x = int(self._num(self._eval(stmt.x, lineno), lineno))
+            y = int(self._num(self._eval(stmt.y, lineno), lineno))
+            color  = int(self._num(self._eval(stmt.color,  lineno), lineno)) if stmt.color  is not None else 7
+            border = int(self._num(self._eval(stmt.border, lineno), lineno)) if stmt.border is not None else None
+            self._renderer.paint(x, y, color, border)
+            return
+
+        if isinstance(stmt, GetStmt):
+            x1 = int(self._num(self._eval(stmt.x1, lineno), lineno))
+            y1 = int(self._num(self._eval(stmt.y1, lineno), lineno))
+            x2 = int(self._num(self._eval(stmt.x2, lineno), lineno))
+            y2 = int(self._num(self._eval(stmt.y2, lineno), lineno))
+            data = self._renderer.get_region(x1, y1, x2, y2)
+            self._arrays[stmt.array_name] = data
+            return
+
+        if isinstance(stmt, PutStmt):
+            x = int(self._num(self._eval(stmt.x, lineno), lineno))
+            y = int(self._num(self._eval(stmt.y, lineno), lineno))
+            data = self._get_array(stmt.array_name, lineno)
+            self._renderer.put_region(x, y, data, stmt.mode)
+            return
+
+        if isinstance(stmt, ColorStmt):
+            fg = int(self._num(self._eval(stmt.fg, lineno), lineno)) if stmt.fg is not None else None
+            bg = int(self._num(self._eval(stmt.bg, lineno), lineno)) if stmt.bg is not None else None
+            self._renderer.color(fg, bg)
+            return
+
+        if isinstance(stmt, PaletteStmt):
+            attr      = int(self._num(self._eval(stmt.attr,      lineno), lineno))
+            color_val = int(self._num(self._eval(stmt.color_val, lineno), lineno))
+            self._renderer.palette(attr, color_val)
+            return
+
+        if isinstance(stmt, BeepStmt):
+            self._renderer.beep()
+            return
+
+        if isinstance(stmt, SoundStmt):
+            freq     = float(self._num(self._eval(stmt.freq,     lineno), lineno))
+            duration = float(self._num(self._eval(stmt.duration, lineno), lineno))
+            self._renderer.sound(freq, duration)
+            return
+
+        if isinstance(stmt, PlayStmt):
+            music = str(self._eval(stmt.music, lineno))
+            self._renderer.play(music)
+            return
+
+        if isinstance(stmt, SleepStmt):
+            secs = float(self._num(self._eval(stmt.duration, lineno), lineno))
+            self._renderer.sleep(secs)
+            return
+
+        if isinstance(stmt, DoStmt):
+            self._exec_do(stmt, lineno)
+            return
+
+        if isinstance(stmt, LoopStmt):
+            self._exec_loop(stmt, lineno)
             return
 
         raise BasicError(f'Unknown statement type {type(stmt).__name__}', lineno)
@@ -533,6 +654,59 @@ class Interpreter:
                     depth -= 1
             search_pc += 1
         raise BasicError('WHILE without matching WEND', lineno)
+
+    # ------------------------------------------------------------------
+    # DO / LOOP
+    # ------------------------------------------------------------------
+
+    def _exec_do(self, stmt: DoStmt, lineno: int):
+        if stmt.condition_type is not None:
+            cond = self._eval(stmt.condition, lineno)
+            passes = self._truthy(cond) if stmt.condition_type == 'WHILE' else not self._truthy(cond)
+            if not passes:
+                # Condition fails on entry — pop any stale frame and skip to LOOP
+                if self._do_stack and self._do_stack[-1].do_pc == self._pc:
+                    self._do_stack.pop()
+                self._skip_to_loop(lineno)
+                return
+        # Push frame only on first entry
+        if not self._do_stack or self._do_stack[-1].do_pc != self._pc:
+            self._do_stack.append(_DoFrame(self._pc, stmt.condition_type, stmt.condition))
+
+    def _exec_loop(self, stmt: LoopStmt, lineno: int):
+        if not self._do_stack:
+            raise BasicError('LOOP without DO', lineno)
+        frame = self._do_stack[-1]
+
+        if stmt.condition_type is not None:
+            cond = self._eval(stmt.condition, lineno)
+            cont = self._truthy(cond) if stmt.condition_type == 'WHILE' else not self._truthy(cond)
+            if cont:
+                raise _PcJumpSignal(frame.do_pc + 1)  # jump to body
+            else:
+                self._do_stack.pop()  # exit loop, fall through
+        else:
+            # No LOOP condition: jump back to DO (re-evaluates DO condition if any)
+            if frame.condition_type is not None:
+                raise _PcJumpSignal(frame.do_pc)  # re-execute DO line
+            else:
+                raise _PcJumpSignal(frame.do_pc + 1)  # jump straight to body (infinite)
+
+    def _skip_to_loop(self, lineno: int):
+        """Advance PC to the matching LOOP, accounting for nesting."""
+        depth = 0
+        search_pc = self._pc + 1
+        while search_pc < len(self._lines):
+            for stmt in self._lines[search_pc].stmts:
+                if isinstance(stmt, DoStmt):
+                    depth += 1
+                elif isinstance(stmt, LoopStmt):
+                    if depth == 0:
+                        self._pc = search_pc
+                        return
+                    depth -= 1
+            search_pc += 1
+        raise BasicError('DO without matching LOOP', lineno)
 
     # ------------------------------------------------------------------
     # Variable access / assignment
@@ -935,6 +1109,16 @@ class Interpreter:
                 raise BasicError('TIME$ takes no arguments', lineno)
             now = datetime.datetime.now()
             return now.strftime('%H:%M:%S')
+
+        # ------------------------------------------------------------------
+        # Graphics functions
+        # ------------------------------------------------------------------
+
+        if name == 'POINT':
+            require(2)
+            x = int(num(0))
+            y = int(num(1))
+            return self._renderer.point(x, y)
 
         # ------------------------------------------------------------------
         # User-defined functions  DEF FN...
