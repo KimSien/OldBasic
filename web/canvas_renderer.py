@@ -42,15 +42,21 @@ class CanvasRenderer(Renderer):
         self._palette = list(_EGA)
         self._fg = 7
         self._bg = 0
+        self._batch: list = []      # B-2: pending draw commands
+        self._css_cache: dict = {}  # E-1: color → CSS string cache
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _css(self, color: int) -> str:
-        if isinstance(color, int) and 0 <= color < len(self._palette):
-            return self._palette[color]
-        return '#FFFFFF'
+        # E-1: cache color → CSS lookups to avoid repeated isinstance + range checks
+        try:
+            return self._css_cache[color]
+        except KeyError:
+            css = self._palette[color] if isinstance(color, int) and 0 <= color < len(self._palette) else '#FFFFFF'
+            self._css_cache[color] = css
+            return css
 
     def _print(self, text: str):
         if self._out:
@@ -61,6 +67,7 @@ class CanvasRenderer(Renderer):
     # ------------------------------------------------------------------
 
     def screen(self, mode: int) -> None:
+        self.flush()  # flush pending draws before canvas resize
         # Resize canvas for common screen modes
         sizes = {1: (320, 200), 7: (320, 200), 9: (640, 350),
                  12: (640, 480), 13: (320, 200)}
@@ -71,98 +78,63 @@ class CanvasRenderer(Renderer):
             self._w, self._h = w, h
 
     def cls(self) -> None:
-        self._ctx.fillStyle = self._css(self._bg)
-        self._ctx.fillRect(0, 0, self._w, self._h)
+        # B-2: queue clear command instead of executing immediately
+        self._batch.append(('cls', self._css(self._bg), self._w, self._h))
 
     # ------------------------------------------------------------------
     # Drawing primitives
     # ------------------------------------------------------------------
 
     def pset(self, x: int, y: int, color: int) -> None:
-        self._ctx.fillStyle = self._css(color)
-        self._ctx.fillRect(x, y, 1, 1)
+        # B-2: queue draw command
+        self._batch.append(('pset', self._css(color), x, y))
 
     def line(self, x1: int, y1: int, x2: int, y2: int, color: int, mode: str = '') -> None:
-        self._ctx.strokeStyle = self._css(color)
-        self._ctx.fillStyle   = self._css(color)
+        # B-2: queue draw command; E-3: single CSS call per line invocation
+        c = self._css(color)
         if mode in ('', 'N'):
-            self._ctx.beginPath()
-            self._ctx.moveTo(x1 + 0.5, y1 + 0.5)
-            self._ctx.lineTo(x2 + 0.5, y2 + 0.5)
-            self._ctx.stroke()
+            self._batch.append(('line', c, x1, y1, x2, y2))
         elif mode == 'B':
-            self._ctx.strokeRect(x1, y1, x2 - x1, y2 - y1)
+            self._batch.append(('rect', c, x1, y1, x2 - x1, y2 - y1))
         elif mode == 'BF':
-            self._ctx.fillRect(x1, y1, x2 - x1, y2 - y1)
+            self._batch.append(('fillrect', c, x1, y1, x2 - x1, y2 - y1))
 
     def circle(self, x: int, y: int, r: int, color: int,
                start=None, end=None, aspect=None) -> None:
-        self._ctx.strokeStyle = self._css(color)
+        # B-2: queue draw command
+        c = self._css(color)
         s = float(start) if start is not None else 0.0
         e = float(end)   if end   is not None else 2 * math.pi
-        self._ctx.beginPath()
         if aspect is not None and aspect != 1.0:
-            self._ctx.save()
-            self._ctx.translate(x, y)
-            self._ctx.scale(1.0, float(aspect))
-            self._ctx.arc(0, 0, r, s, e)
-            self._ctx.restore()
+            self._batch.append(('circle_scaled', c, x, y, r, s, e, float(aspect)))
         else:
-            self._ctx.arc(x, y, r, s, e)
-        self._ctx.stroke()
+            self._batch.append(('circle', c, x, y, r, s, e))
+
+    def flush(self) -> None:
+        """B-3: flush queued draw commands to the JS canvas in a single call."""
+        if self._batch:
+            js.window.basicBatchDraw(to_js(self._batch))
+            self._batch.clear()
 
     def paint(self, x: int, y: int, color: int, border=None) -> None:
-        """Flood-fill from (x, y) with color, stopping at border color."""
+        """C-1: Flood-fill via JS (avoids Python↔JS buffer round-trips)."""
+        self.flush()  # must render pending draws before reading canvas pixels
         w, h = self._w, self._h
         if x < 0 or x >= w or y < 0 or y >= h:
             return
 
-        # Parse fill color
         fc = self._css(color)
         fr, fg_v, fb = int(fc[1:3], 16), int(fc[3:5], 16), int(fc[5:7], 16)
-
-        # Read full canvas into a Python bytearray
-        img = self._ctx.getImageData(0, 0, w, h)
-        buf = bytearray(img.data.to_py())
-
-        # Seed pixel color
-        i0 = (y * w + x) * 4
-        sr, sg, sb = buf[i0], buf[i0 + 1], buf[i0 + 2]
-
-        if (sr, sg, sb) == (fr, fg_v, fb):
-            return  # already the target color
 
         if border is not None:
             bc = self._css(border)
             brr, brg, brb = int(bc[1:3], 16), int(bc[3:5], 16), int(bc[5:7], 16)
-            def _passable(r, g, b):
-                return (r, g, b) != (brr, brg, brb)
+            js.window.basicFloodFill(x, y, fr, fg_v, fb, brr, brg, brb, True)
         else:
-            def _passable(r, g, b):
-                return (r, g, b) == (sr, sg, sb)
-
-        # BFS scanline-based flood fill
-        visited = bytearray(w * h)
-        stack = [x + y * w]
-        while stack:
-            p = stack.pop()
-            if visited[p]:
-                continue
-            py_y, px = divmod(p, w)
-            i4 = p * 4
-            if not _passable(buf[i4], buf[i4 + 1], buf[i4 + 2]):
-                continue
-            visited[p] = 1
-            buf[i4], buf[i4 + 1], buf[i4 + 2], buf[i4 + 3] = fr, fg_v, fb, 255
-            if px > 0:     stack.append(p - 1)
-            if px < w - 1: stack.append(p + 1)
-            if py_y > 0:   stack.append(p - w)
-            if py_y < h-1: stack.append(p + w)
-
-        img.data.set(to_js(bytes(buf)))
-        self._ctx.putImageData(img, 0, 0)
+            js.window.basicFloodFill(x, y, fr, fg_v, fb, 0, 0, 0, False)
 
     def point(self, x: int, y: int) -> int:
+        self.flush()  # render pending draws before sampling pixel
         data = self._ctx.getImageData(x, y, 1, 1).data
         r_val = int(data[0])
         g_val = int(data[1])
@@ -174,6 +146,7 @@ class CanvasRenderer(Renderer):
             return -1
 
     def get_region(self, x1: int, y1: int, x2: int, y2: int) -> list:
+        self.flush()  # render pending draws before capturing region
         w = x2 - x1 + 1
         h = y2 - y1 + 1
         img  = self._ctx.getImageData(x1, y1, w, h)
@@ -185,6 +158,7 @@ class CanvasRenderer(Renderer):
 
     def put_region(self, x: int, y: int, data: list, mode: str = 'PSET') -> None:
         """Blit sprite data to canvas. Supports PSET, PRESET, XOR, AND, OR."""
+        self.flush()  # ensure pending draws land before blitting sprite
         if not data:
             return
         n = len(data)
@@ -274,6 +248,7 @@ class CanvasRenderer(Renderer):
             g_val = (color_val >>  8) & 0xFF
             b_val =  color_val        & 0xFF
             self._palette[attr] = f'#{r_val:02X}{g_val:02X}{b_val:02X}'
+            self._css_cache.clear()  # E-1: invalidate cache on palette change
 
     # ------------------------------------------------------------------
     # Sound

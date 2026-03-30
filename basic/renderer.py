@@ -29,6 +29,7 @@ class Renderer:
     def play(self, music: str) -> None: pass
     def sleep(self, seconds: float) -> None: time.sleep(seconds)
     def inkey(self) -> str: return ''
+    def flush(self) -> None: pass
 
 
 class NullRenderer(Renderer):

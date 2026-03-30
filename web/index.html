@@ -103,6 +103,98 @@ window.addEventListener('blur', () => {
   updateKeyDebug('idle');
 });
 
+// B-1: Batch drawing — execute queued canvas commands in a single JS call.
+// E-3: Track current fill/stroke style to skip redundant property sets.
+window.basicBatchDraw = function(cmds) {
+  const ctx = document.getElementById('canvas').getContext('2d');
+  let curFill = null, curStroke = null;
+  for (const c of cmds) {
+    switch (c[0]) {
+      case 'cls':
+        if (c[1] !== curFill) { ctx.fillStyle = c[1]; curFill = c[1]; }
+        ctx.fillRect(0, 0, c[2], c[3]);
+        break;
+      case 'pset':
+        if (c[1] !== curFill) { ctx.fillStyle = c[1]; curFill = c[1]; }
+        ctx.fillRect(c[2], c[3], 1, 1);
+        break;
+      case 'line':
+        if (c[1] !== curStroke) { ctx.strokeStyle = c[1]; curStroke = c[1]; }
+        ctx.beginPath();
+        ctx.moveTo(c[2] + 0.5, c[3] + 0.5);
+        ctx.lineTo(c[4] + 0.5, c[5] + 0.5);
+        ctx.stroke();
+        break;
+      case 'rect':
+        if (c[1] !== curStroke) { ctx.strokeStyle = c[1]; curStroke = c[1]; }
+        ctx.strokeRect(c[2], c[3], c[4], c[5]);
+        break;
+      case 'fillrect':
+        if (c[1] !== curFill) { ctx.fillStyle = c[1]; curFill = c[1]; }
+        ctx.fillRect(c[2], c[3], c[4], c[5]);
+        break;
+      case 'circle':
+        if (c[1] !== curStroke) { ctx.strokeStyle = c[1]; curStroke = c[1]; }
+        ctx.beginPath();
+        ctx.arc(c[2], c[3], c[4], c[5], c[6]);
+        ctx.stroke();
+        break;
+      case 'circle_scaled':
+        if (c[1] !== curStroke) { ctx.strokeStyle = c[1]; curStroke = c[1]; }
+        ctx.save();
+        ctx.translate(c[2], c[3]);
+        ctx.scale(1.0, c[7]);
+        ctx.beginPath();
+        ctx.arc(0, 0, c[4], c[5], c[6]);
+        ctx.stroke();
+        ctx.restore();
+        break;
+    }
+  }
+};
+
+// C-1/C-2: JS-side flood fill with scanline BFS — avoids Python↔JS buffer transfer.
+window.basicFloodFill = function(cx, cy, fillR, fillG, fillB, borderR, borderG, borderB, useBorder) {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  if (cx < 0 || cx >= w || cy < 0 || cy >= h) return;
+
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  const i0 = (cy * w + cx) * 4;
+  const seedR = d[i0], seedG = d[i0 + 1], seedB = d[i0 + 2];
+
+  if (seedR === fillR && seedG === fillG && seedB === fillB) return;
+
+  const visited = new Uint8Array(w * h);
+  const stack = [cx + cy * w];
+
+  while (stack.length > 0) {
+    const p = stack.pop();
+    if (visited[p]) continue;
+    const py = (p / w) | 0;
+    const px = p % w;
+    const i4 = p * 4;
+
+    if (useBorder) {
+      if (d[i4] === borderR && d[i4 + 1] === borderG && d[i4 + 2] === borderB) continue;
+    } else {
+      if (d[i4] !== seedR || d[i4 + 1] !== seedG || d[i4 + 2] !== seedB) continue;
+    }
+
+    visited[p] = 1;
+    d[i4] = fillR; d[i4 + 1] = fillG; d[i4 + 2] = fillB; d[i4 + 3] = 255;
+
+    if (px > 0)     stack.push(p - 1);
+    if (px < w - 1) stack.push(p + 1);
+    if (py > 0)     stack.push(p - w);
+    if (py < h - 1) stack.push(p + w);
+  }
+
+  ctx.putImageData(img, 0, 0);
+};
+
 let pyodide = null;
 const statusEl  = document.getElementById('status');
 const consoleEl = document.getElementById('console');
@@ -155,11 +247,12 @@ from canvas_renderer import CanvasRenderer
 
 # Live stdout — writes directly to the console div without buffering
 class _LiveOut:
-    def write(self, text):
+    def __init__(self):
         import js as _js
-        el = _js.document.getElementById('console')
-        if el and text:
-            el.textContent += text
+        self._el = _js.document.getElementById('console')  # E-2: cache DOM ref
+    def write(self, text):
+        if self._el and text:
+            self._el.textContent += text
     def flush(self): pass
 sys.stdout = _LiveOut()
 print("BASIC interpreter ready")

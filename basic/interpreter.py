@@ -154,6 +154,7 @@ class Interpreter:
         await self._run_loop_async()
 
     async def _run_loop_async(self):
+        step = 0
         while 0 <= self._pc < len(self._lines):
             line = self._lines[self._pc]
             try:
@@ -170,14 +171,24 @@ class Interpreter:
                 self._pc = self._gosub_stack.pop()
             except _PcJumpSignal as j:
                 self._pc = j.pc
-            except _SleepSignal as s:
+            except _SleepSignal as s:          # A-3: SLEEP (including SLEEP 0)
                 self._pc += 1
+                self._renderer.flush()          # B-3: flush draw batch before yield
                 await asyncio.sleep(s.seconds)
+                step = 0
+                continue
             except _EndSignal:
+                self._renderer.flush()
                 return
             except BasicError:
                 raise
-            await asyncio.sleep(0)  # yield to JS event loop → browser can repaint
+
+            step += 1
+            if step >= 500:                     # A-2: fallback yield every 500 lines
+                self._renderer.flush()
+                await asyncio.sleep(0)
+                step = 0
+        self._renderer.flush()
 
     def run_line(self, raw: str):
         """Execute a single line (REPL mode). Line number 0 = immediate."""
@@ -797,39 +808,28 @@ class Interpreter:
     # ------------------------------------------------------------------
 
     def _eval(self, node: Any, lineno: int) -> Any:
-        if isinstance(node, NumberNode):
-            return node.value
+        # D-1: O(1) dispatch table — avoids 7-level isinstance chain
+        try:
+            return self._EVAL_DISPATCH[type(node)](self, node, lineno)
+        except KeyError:
+            raise BasicError(f'Unknown node type {type(node).__name__}', lineno)
 
-        if isinstance(node, StringNode):
-            return node.value
+    def _eval_array_access(self, node: Any, lineno: int) -> Any:
+        arr = self._get_array(node.name, lineno)
+        idx = int(self._eval(node.index, lineno))
+        if idx < 0 or idx >= len(arr):
+            raise BasicError(
+                f'Array index {idx} out of bounds for {node.name}', lineno
+            )
+        return arr[idx]
 
-        if isinstance(node, VarNode):
-            return self._get_var(node.name)
-
-        if isinstance(node, ArrayAccessNode):
-            arr = self._get_array(node.name, lineno)
-            idx = int(self._eval(node.index, lineno))
-            if idx < 0 or idx >= len(arr):
-                raise BasicError(
-                    f'Array index {idx} out of bounds for {node.name}', lineno
-                )
-            return arr[idx]
-
-        if isinstance(node, FuncCallNode):
-            return self._call_func(node.name, node.args, lineno)
-
-        if isinstance(node, UnaryOpNode):
-            operand = self._eval(node.operand, lineno)
-            if node.op == TT.MINUS:
-                return -self._num(operand, lineno)
-            if node.op == TT.NOT:
-                return 0 if self._truthy(operand) else -1
-            raise BasicError(f'Unknown unary op {node.op}', lineno)
-
-        if isinstance(node, BinOpNode):
-            return self._eval_binop(node, lineno)
-
-        raise BasicError(f'Unknown node type {type(node).__name__}', lineno)
+    def _eval_unary_op(self, node: Any, lineno: int) -> Any:
+        operand = self._eval(node.operand, lineno)
+        if node.op == TT.MINUS:
+            return -self._num(operand, lineno)
+        if node.op == TT.NOT:
+            return 0 if self._truthy(operand) else -1
+        raise BasicError(f'Unknown unary op {node.op}', lineno)
 
     def _eval_binop(self, node: BinOpNode, lineno: int) -> Any:
         op = node.op
@@ -1228,3 +1228,17 @@ class Interpreter:
     def _decompile_line(self, line: Line) -> str:
         """Return the original source text for the LIST command."""
         return f'{line.lineno} {line.source}'
+
+
+# D-1/D-2: Dispatch table for _eval — O(1) type → handler lookup.
+# NumberNode and VarNode (most frequent) are listed first for dict-insert order,
+# but dict lookup is O(1) regardless of order.
+Interpreter._EVAL_DISPATCH = {
+    NumberNode:      lambda self, node, lineno: node.value,
+    StringNode:      lambda self, node, lineno: node.value,
+    VarNode:         lambda self, node, lineno: self._get_var(node.name),
+    BinOpNode:       Interpreter._eval_binop,
+    FuncCallNode:    lambda self, node, lineno: self._call_func(node.name, node.args, lineno),
+    ArrayAccessNode: Interpreter._eval_array_access,
+    UnaryOpNode:     Interpreter._eval_unary_op,
+}

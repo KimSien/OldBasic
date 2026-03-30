@@ -334,16 +334,16 @@ window.basicFloodFill = function(cx, cy, fillR, fillG, fillB, borderR, borderG, 
 
 ## ステータス
 
-- [ ] A-1 yield をフレーム境界のみに変更
-- [ ] A-2 行数カウンタによるフォールバック yield
-- [ ] A-3 `SLEEP 0` のマッピング
-- [ ] B-1 JS 側バッチ描画関数
-- [ ] B-2 Python 側描画コマンドキューイング
-- [ ] B-3 フレーム境界でフラッシュ
-- [ ] C-1 PAINT を JS 側で実行
-- [ ] C-2 スキャンライン最適化
-- [ ] D-1 式評価のディスパッチテーブル化
-- [ ] D-2 頻出ノードの短絡評価
-- [ ] E-1 `_css()` キャッシュ
-- [ ] E-2 `_LiveOut` DOM 参照キャッシュ
-- [ ] E-3 `fillStyle`/`strokeStyle` 重複設定回避
+- [x] A-1 yield をフレーム境界のみに変更
+- [x] A-2 行数カウンタによるフォールバック yield
+- [x] A-3 `SLEEP 0` のマッピング
+- [x] B-1 JS 側バッチ描画関数
+- [x] B-2 Python 側描画コマンドキューイング
+- [x] B-3 フレーム境界でフラッシュ
+- [x] C-1 PAINT を JS 側で実行
+- [x] C-2 スキャンライン最適化
+- [x] D-1 式評価のディスパッチテーブル化
+- [x] D-2 頻出ノードの短絡評価
+- [x] E-1 `_css()` キャッシュ
+- [x] E-2 `_LiveOut` DOM 参照キャッシュ
+- [x] E-3 `fillStyle`/`strokeStyle` 重複設定回避
